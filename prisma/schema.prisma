@@ -1,0 +1,73 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Organization {
+  id        String    @id @default(cuid())
+  name      String
+  programs  Program[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Program {
+  id             String         @id @default(cuid())
+  name           String
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+  beneficiaries  Beneficiary[]
+  timelines      Timeline[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+}
+
+model Beneficiary {
+  id               String              @id @default(cuid())
+  beneficiary_code String              @unique
+  name             String?
+  mnemonic_id      String
+  programId        String
+  program          Program             @relation(fields: [programId], references: [id])
+  measurements     MeasurementRecord[]
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+}
+
+model Timeline {
+  id        String    @id @default(cuid())
+  name      String
+  programId String
+  program   Program   @relation(fields: [programId], references: [id])
+  sessions  Session[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Session {
+  id           String              @id @default(cuid())
+  name         String
+  date         DateTime
+  timelineId   String
+  timeline     Timeline            @relation(fields: [timelineId], references: [id])
+  measurements MeasurementRecord[]
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+}
+
+model MeasurementRecord {
+  id            String      @id @default(cuid())
+  weight        Float
+  height        Float
+  statusFlag    String      @default("ON_TRACK") // ON_TRACK, MONITOR_CLOSELY, ACTION_REQUIRED
+  beneficiaryId String
+  beneficiary   Beneficiary @relation(fields: [beneficiaryId], references: [id])
+  sessionId     String
+  session       Session     @relation(fields: [sessionId], references: [id])
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
