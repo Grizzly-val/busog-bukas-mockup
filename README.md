@@ -1,5 +1,7 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+Backend setup, the offline sync contract, AI privacy boundary, and schema rollback notes are documented in [`docs/backend.md`](docs/backend.md).
+
 ## Getting Started
 
 First, run the development server:

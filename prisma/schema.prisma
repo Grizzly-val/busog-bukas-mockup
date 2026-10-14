@@ -16,14 +16,16 @@ model Organization {
 }
 
 model Program {
-  id             String         @id @default(cuid())
+  id             String        @id @default(cuid())
   name           String
   organizationId String
-  organization   Organization   @relation(fields: [organizationId], references: [id])
+  organization   Organization  @relation(fields: [organizationId], references: [id])
   beneficiaries  Beneficiary[]
   timelines      Timeline[]
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([organizationId])
 }
 
 model Beneficiary {
@@ -36,6 +38,8 @@ model Beneficiary {
   measurements     MeasurementRecord[]
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
+
+  @@index([programId])
 }
 
 model Timeline {
@@ -46,17 +50,22 @@ model Timeline {
   sessions  Session[]
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
+
+  @@index([programId])
 }
 
 model Session {
-  id           String              @id @default(cuid())
-  name         String
-  date         DateTime
-  timelineId   String
-  timeline     Timeline            @relation(fields: [timelineId], references: [id])
-  measurements MeasurementRecord[]
-  createdAt    DateTime            @default(now())
-  updatedAt    DateTime            @updatedAt
+  id              String              @id @default(cuid())
+  clientReference String?             @unique
+  name            String
+  date            DateTime
+  timelineId      String
+  timeline        Timeline            @relation(fields: [timelineId], references: [id])
+  measurements    MeasurementRecord[]
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@index([timelineId, date])
 }
 
 model MeasurementRecord {
@@ -70,4 +79,8 @@ model MeasurementRecord {
   session       Session     @relation(fields: [sessionId], references: [id])
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
+
+  @@unique([sessionId, beneficiaryId])
+  @@index([beneficiaryId])
+  @@index([sessionId])
 }
