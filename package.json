@@ -1,0 +1,42 @@
+{
+  "name": "busog_bukas",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "test": "vitest run",
+    "db:validate": "prisma validate",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "postinstall": "prisma generate"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.76",
+    "@ai-sdk/google": "^4.0.92",
+    "@ai-sdk/openai": "^4.0.89",
+    "@ducanh2912/next-pwa": "^10.2.9",
+    "@prisma/client": "^5.22.0",
+    "ai": "^7.0.133",
+    "dotenv": "^18.0.6",
+    "idb": "^8.0.4",
+    "next": "16.4.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/turbopack": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.4.0",
+    "prisma": "^5.22.0",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.3"
+  }
+}
