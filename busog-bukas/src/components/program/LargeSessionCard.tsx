@@ -8,11 +8,23 @@ import type {
   AvailableAllergy,
   AssignedNutritionist,
   SurveyQuestion,
-  TimelineData,
+  ProgramWeekData,
   SessionRecordSummary,
 } from '@/lib/programData';
 import { formatDate } from '@/lib/format';
-import { ageInMonths } from '@/lib/statusRule';
+import {
+  ALL_METRICS,
+  HEIGHT_NOTICE_MESSAGE,
+  METRIC_LABEL,
+  STATUS_BADGE_CLASS,
+  STATUS_LABEL,
+  ageInMonths,
+  classifyBmiStatus,
+  computeBmi,
+  computeWhtr,
+  resolveEffectiveHeight,
+  shouldShowHeightNotice,
+} from '@/lib/statusRule';
 import { SESSION_STATE_META } from '@/lib/timelineRules';
 import {
   registerBeneficiaryAction,
@@ -28,7 +40,7 @@ type Props = {
   availableAllergies: AvailableAllergy[];
   assignedNutritionists: AssignedNutritionist[];
   surveyQuestions: SurveyQuestion[];
-  timelines: TimelineData[];
+  weeks: ProgramWeekData[];
   today: string;
   onClose?: () => void;
 };
@@ -40,7 +52,6 @@ export default function LargeSessionCard({
   availableAllergies,
   assignedNutritionists,
   surveyQuestions,
-  timelines,
   today,
   onClose,
 }: Props) {
@@ -56,9 +67,6 @@ export default function LargeSessionCard({
   const isUpcoming =
     session.state === 'upcoming' ||
     (session.submitted_at == null && session.records.length === 0 && session.session_date > today);
-
-  // Check if session ends an open timeline
-  const closingTimeline = timelines.find((t) => t.end_session_id === session.session_id && t.state === 'open');
 
   // Registered beneficiaries as of this session date
   const registeredBeneficiaries = beneficiaries.filter((b) => b.registered_session_date <= session.session_date);
@@ -85,25 +93,51 @@ export default function LargeSessionCard({
     q_satisfaction: 4,
   });
 
-  // Duplicate measurement check for Default Input
-  let duplicateNotice: { date: string; seq: number } | null = null;
-  if (defaultBenCode && session.owning_seq) {
-    const targetBen = beneficiaries.find((b) => b.beneficiary_code === defaultBenCode);
-    const owningTl = timelines.find((t) => t.seq === session.owning_seq);
-    if (targetBen && owningTl) {
-      for (const m of targetBen.measurements) {
-        if (m.session_id !== session.session_id && (m.weight_kg != null || m.height_cm != null)) {
-          if (
-            (owningTl.seq === 1 && m.session_date >= owningTl.start_date && m.session_date <= owningTl.end_date) ||
-            (owningTl.seq > 1 && m.session_date > owningTl.start_date && m.session_date <= owningTl.end_date)
-          ) {
-            duplicateNotice = { date: m.session_date, seq: owningTl.seq };
-            break;
-          }
-        }
-      }
-    }
-  }
+  const selectedDefaultBen = beneficiaries.find((b) => b.beneficiary_code === defaultBenCode) ?? null;
+  const isRegistrationSessionForDefaultBen =
+    selectedDefaultBen?.registered_session_id === session.session_id;
+
+  // Carry-forward height resolution & young child height notice for Default Input
+  const defaultPriorEffectiveHeight = selectedDefaultBen
+    ? resolveEffectiveHeight({
+        sessionDate: session.session_date,
+        sessionHeightCm: null,
+        priorHeights: selectedDefaultBen.explicit_heights
+          .filter((h) => h.session_id !== session.session_id && h.session_date <= session.session_date)
+          .map((h) => ({ sessionDate: h.session_date, heightCm: h.height_cm })),
+        initialHeightCm: selectedDefaultBen.initial_height_cm,
+        registrationDate: selectedDefaultBen.registered_session_date,
+      })
+    : { heightCm: null, heightDate: null, carriedForward: false };
+
+  const parsedDefaultWeight = defaultWeight ? parseFloat(defaultWeight) : null;
+  const parsedDefaultHeight = defaultHeight ? parseFloat(defaultHeight) : null;
+  const parsedDefaultWaist = defaultWaist ? parseFloat(defaultWaist) : null;
+
+  const effectiveDefaultHeightCm =
+    parsedDefaultHeight && parsedDefaultHeight > 0
+      ? parsedDefaultHeight
+      : !isRegistrationSessionForDefaultBen
+      ? defaultPriorEffectiveHeight.heightCm
+      : null;
+  const effectiveDefaultHeightDate =
+    parsedDefaultHeight && parsedDefaultHeight > 0
+      ? session.session_date
+      : defaultPriorEffectiveHeight.heightDate;
+
+  const showDefaultHeightNotice =
+    selectedDefaultBen != null &&
+    (!parsedDefaultHeight || parsedDefaultHeight <= 0) &&
+    !isRegistrationSessionForDefaultBen &&
+    shouldShowHeightNotice({
+      birthMonth: selectedDefaultBen.birth_month,
+      birthYear: selectedDefaultBen.birth_year,
+      effectiveHeightDate: effectiveDefaultHeightDate,
+      asOfDate: session.session_date,
+    });
+
+  const liveDefaultBmi = computeBmi(parsedDefaultWeight, effectiveDefaultHeightCm);
+  const liveDefaultWhtr = computeWhtr(parsedDefaultWaist, effectiveDefaultHeightCm);
 
   // Load existing session record into Default Input form for editing
   const handleEditRecord = (record: SessionRecordSummary) => {
@@ -148,10 +182,10 @@ export default function LargeSessionCard({
         programId,
         sessionId: session.session_id,
         beneficiaryCode: defaultBenCode,
-        isPresent: defaultPresent,
-        weightKg: defaultWeight ? parseFloat(defaultWeight) : null,
-        heightCm: defaultHeight ? parseFloat(defaultHeight) : null,
-        waistCm: defaultWaist ? parseFloat(defaultWaist) : null,
+        isPresent: isRegistrationSessionForDefaultBen ? true : defaultPresent,
+        weightKg: (isRegistrationSessionForDefaultBen || defaultPresent) && defaultWeight ? parseFloat(defaultWeight) : null,
+        heightCm: (isRegistrationSessionForDefaultBen || defaultPresent) && defaultHeight ? parseFloat(defaultHeight) : null,
+        waistCm: (isRegistrationSessionForDefaultBen || defaultPresent) && defaultWaist ? parseFloat(defaultWaist) : null,
         surveyAnswers: surveyVals,
       });
 
@@ -170,6 +204,8 @@ export default function LargeSessionCard({
   const [regBirthMonth, setRegBirthMonth] = useState<number>(1);
   const [regBirthYear, setRegBirthYear] = useState<number>(2018);
   const [regSex, setRegSex] = useState<'female' | 'male'>('female');
+  const [regWeightKg, setRegWeightKg] = useState<string>('');
+  const [regHeightCm, setRegHeightCm] = useState<string>('');
   const [regName, setRegName] = useState<string>('');
   const [regSelectedAllergies, setRegSelectedAllergies] = useState<string[]>([]);
   const [regGuardianName, setRegGuardianName] = useState<string>('');
@@ -180,10 +216,29 @@ export default function LargeSessionCard({
   const regIsMinor = regMonths < 216; // < 18 years
   const requiresGuardian = regIsMinor && Boolean(regName.trim());
 
+  const parsedRegWeight = regWeightKg ? parseFloat(regWeightKg) : null;
+  const parsedRegHeight = regHeightCm ? parseFloat(regHeightCm) : null;
+  const liveRegBmiStatus = classifyBmiStatus({
+    sex: regSex,
+    birthMonth: Number(regBirthMonth),
+    birthYear: Number(regBirthYear),
+    asOf: session.session_date,
+    weightKg: parsedRegWeight,
+    heightCm: parsedRegHeight,
+  });
+
   const handleRegisterBeneficiary = (e: React.FormEvent) => {
     e.preventDefault();
     if (isLocked) return;
     setActionMessage(null);
+
+    if (!parsedRegWeight || parsedRegWeight <= 0 || !parsedRegHeight || parsedRegHeight <= 0) {
+      setActionMessage({
+        type: 'danger',
+        text: 'Initial weight (kg) and initial height (cm) are required and must be positive.',
+      });
+      return;
+    }
 
     if (requiresGuardian) {
       if (!regGuardianName.trim() || !regGuardianNumber.trim() || !regGuardianRel.trim()) {
@@ -202,6 +257,8 @@ export default function LargeSessionCard({
         birthMonth: Number(regBirthMonth),
         birthYear: Number(regBirthYear),
         sex: regSex,
+        initialWeightKg: parsedRegWeight,
+        initialHeightCm: parsedRegHeight,
         name: regName.trim() || null,
         allergies: regSelectedAllergies,
         guardian:
@@ -217,9 +274,11 @@ export default function LargeSessionCard({
       if (res.success && res.beneficiaryCode) {
         setActionMessage({
           type: 'success',
-          text: `Beneficiary #${res.beneficiaryCode} registered! Assigned: ${res.displayName}. Check-in record created.`,
+          text: `Beneficiary #${res.beneficiaryCode} registered! Assigned: ${res.displayName}. Initial record and BMI status saved.`,
         });
         setRegName('');
+        setRegWeightKg('');
+        setRegHeightCm('');
         setRegGuardianName('');
         setRegGuardianNumber('');
         setRegSelectedAllergies([]);
@@ -239,13 +298,16 @@ export default function LargeSessionCard({
   );
   const [nutriId, setNutriId] = useState<string>(assignedNutritionists[0]?.nutritionist_id ?? '');
   const [nutriMuac, setNutriMuac] = useState<string>('');
-  const [nutriEdema, setNutriEdema] = useState<boolean>(false);
+  const [nutriEdemaState, setNutriEdemaState] = useState<'null' | 'false' | 'true'>('null');
   const [nutriNotes, setNutriNotes] = useState<string>('');
 
   const handleSaveNutritionist = (e: React.FormEvent) => {
     e.preventDefault();
     if (isLocked || !hasNutritionists) return;
     setActionMessage(null);
+
+    const edemaValue =
+      nutriEdemaState === 'true' ? true : nutriEdemaState === 'false' ? false : null;
 
     startTransition(async () => {
       const res = await saveNutritionistInputAction({
@@ -254,7 +316,7 @@ export default function LargeSessionCard({
         beneficiaryCode: nutriBenCode,
         nutritionistId: nutriId,
         muacCm: nutriMuac ? parseFloat(nutriMuac) : null,
-        edema: nutriEdema,
+        edema: edemaValue,
         clinicalNotes: nutriNotes,
       });
 
@@ -381,14 +443,9 @@ export default function LargeSessionCard({
               <span className={`badge rounded-pill ${SESSION_STATE_META[session.state].badgeClass}`}>
                 {SESSION_STATE_META[session.state].label}
               </span>
-              {session.boundary.isBoundary && (
-                <span className="badge rounded-pill bg-dark text-white">
-                  Boundary: T{session.boundary.endsSeq} ⇄ T{session.boundary.startsSeq}
-                </span>
-              )}
-              {session.owning_seq && (
+              {session.week_number != null && (
                 <span className="badge rounded-pill badge-pale-info">
-                  Timeline {session.owning_seq} Attribution
+                  Week {session.week_number}
                 </span>
               )}
             </div>
@@ -619,11 +676,10 @@ export default function LargeSessionCard({
               </div>
             </div>
 
-            {/* Session Notes & Stored AI Observation */}
-            {(session.notes.length > 0 || session.aggregates.ai_comments) && (
+            {/* Session Notes */}
+            {session.notes.length > 0 && (
               <div className="row g-2">
-                {session.notes.length > 0 && (
-                  <div className="col-12 col-md-6">
+                <div className="col-12">
                     <div className="bg-light-subtle rounded-4 p-3 border h-100">
                       <span className="small text-body-secondary fw-semibold text-uppercase d-block mb-1">
                         Session Notes
@@ -640,22 +696,6 @@ export default function LargeSessionCard({
                       </div>
                     </div>
                   </div>
-                )}
-
-                {session.aggregates.ai_comments && (
-                  <div className="col-12 col-md-6">
-                    <div className="bg-light-subtle rounded-4 p-3 border h-100">
-                      <div className="d-flex justify-content-between align-items-center mb-1">
-                        <span className="badge badge-pale-info" style={{ fontSize: '0.68rem' }}>
-                          AI Session Insight ({session.aggregates.ai_category?.replace('_', ' ')})
-                        </span>
-                      </div>
-                      <p className="small mb-0 text-body-secondary fst-italic">
-                        &ldquo;{session.aggregates.ai_comments}&rdquo;
-                      </p>
-                    </div>
-                  </div>
-                )}
               </div>
             )}
           </section>
@@ -756,6 +796,7 @@ export default function LargeSessionCard({
                     <th className="text-end">Waist</th>
                     <th className="text-end">BMI</th>
                     <th className="text-end">WHtR</th>
+                    <th>Statuses</th>
 
                     {/* Distinct Nutritionist Column 1: MUAC */}
                     {hasNutritionistData && <th className="text-end">MUAC</th>}
@@ -773,7 +814,7 @@ export default function LargeSessionCard({
                   {session.records.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={hasNutritionistData ? (isLocked ? 10 : 11) : (isLocked ? 7 : 8)}
+                        colSpan={hasNutritionistData ? (isLocked ? 11 : 12) : (isLocked ? 8 : 9)}
                         className="text-center py-5 text-body-secondary"
                       >
                         <div className="d-flex flex-column align-items-center gap-1">
@@ -809,9 +850,20 @@ export default function LargeSessionCard({
                               ) : (
                                 <span className="text-body-secondary">—</span>
                               )}
-                              <span className="text-body-secondary" style={{ fontSize: '0.7rem' }}>
-                                {r.sex === 'female' ? 'Female' : 'Male'} · {r.age} yrs
-                              </span>
+                              <div className="d-flex flex-wrap align-items-center gap-1">
+                                <span className="text-body-secondary" style={{ fontSize: '0.7rem' }}>
+                                  {r.sex === 'female' ? 'Female' : 'Male'} · {r.age} yrs
+                                </span>
+                                {r.height_notice && (
+                                  <span
+                                    className="badge badge-pale-warning"
+                                    style={{ fontSize: '0.62rem' }}
+                                    title={HEIGHT_NOTICE_MESSAGE}
+                                  >
+                                    Fresh height due
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           </td>
 
@@ -820,9 +872,20 @@ export default function LargeSessionCard({
                             {r.weight_kg != null ? `${r.weight_kg.toFixed(1)} kg` : <span className="text-body-secondary">—</span>}
                           </td>
 
-                          {/* Height */}
+                          {/* Height (explicit or carried forward) */}
                           <td className="text-end bb-num">
-                            {r.height_cm != null ? `${r.height_cm.toFixed(1)} cm` : <span className="text-body-secondary">—</span>}
+                            {r.height_cm != null ? (
+                              `${r.height_cm.toFixed(1)} cm`
+                            ) : r.effective_height_cm != null && r.height_carried_forward ? (
+                              <span title={`Carried forward from ${formatDate(r.effective_height_date)}`}>
+                                <span className="text-body-secondary">{r.effective_height_cm.toFixed(1)} cm</span>{' '}
+                                <span className="badge badge-pale-neutral" style={{ fontSize: '0.6rem' }}>
+                                  Carried
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="text-body-secondary">—</span>
+                            )}
                           </td>
 
                           {/* Waist */}
@@ -838,6 +901,28 @@ export default function LargeSessionCard({
                           {/* WHtR */}
                           <td className="text-end bb-num">
                             {r.whtr != null ? r.whtr.toFixed(2) : <span className="text-body-secondary">—</span>}
+                          </td>
+
+                          {/* Per-metric statuses for this session */}
+                          <td>
+                            <div className="d-flex flex-wrap gap-1">
+                              {ALL_METRICS.map((m) => {
+                                const st = r.metric_statuses[m];
+                                if (!st) return null;
+                                return (
+                                  <span
+                                    key={m}
+                                    className={`badge ${STATUS_BADGE_CLASS[st.status_key]}`}
+                                    style={{ fontSize: '0.64rem' }}
+                                  >
+                                    {METRIC_LABEL[m]}: {STATUS_LABEL[st.status_key]}
+                                  </span>
+                                );
+                              })}
+                              {ALL_METRICS.every((m) => !r.metric_statuses[m]) && (
+                                <span className="text-body-secondary">—</span>
+                              )}
+                            </div>
                           </td>
 
                           {/* Distinct Nutritionist Column 1: MUAC */}
@@ -946,11 +1031,18 @@ export default function LargeSessionCard({
               </button>
             </div>
 
-            {duplicateNotice && (
+            {isRegistrationSessionForDefaultBen && (
+              <div className="alert alert-info border-0 p-3 rounded-3 small mb-3">
+                ℹ️ <strong>Registration Session Write-Through:</strong> This is #{defaultBenCode}&rsquo;s
+                registration session. Updating weight or height here also updates their stored initial measurements.
+              </div>
+            )}
+
+            {showDefaultHeightNotice && (
               <div className="alert alert-warning border-0 p-3 rounded-3 small mb-3">
-                ⚠️ <strong>Measurement Notice:</strong> Beneficiary #{defaultBenCode} already has recorded
-                measurements in Timeline {duplicateNotice.seq} on {formatDate(duplicateNotice.date)}. Saving
-                here will update their record for this session.
+                📏 <strong>Height Notice:</strong> {HEIGHT_NOTICE_MESSAGE}. (Using height from{' '}
+                {effectiveDefaultHeightDate ? formatDate(effectiveDefaultHeightDate) : 'registration'}:{' '}
+                <strong>{defaultPriorEffectiveHeight.heightCm?.toFixed(1)} cm</strong>.)
               </div>
             )}
 
@@ -980,9 +1072,9 @@ export default function LargeSessionCard({
                   type="checkbox"
                   role="switch"
                   id="defaultPresentSwitch"
-                  checked={defaultPresent}
+                  checked={isRegistrationSessionForDefaultBen ? true : defaultPresent}
                   onChange={(e) => setDefaultPresent(e.target.checked)}
-                  disabled={isLocked || isPending}
+                  disabled={isLocked || isPending || isRegistrationSessionForDefaultBen}
                 />
                 <label className="form-check-label small fw-semibold" htmlFor="defaultPresentSwitch">
                   Mark as Present for this Session
@@ -990,9 +1082,11 @@ export default function LargeSessionCard({
               </div>
 
               {/* Anthropometrics */}
-              <div className="row g-2 mb-3">
+              <div className="row g-2 mb-2">
                 <div className="col-4">
-                  <label className="form-label small mb-1">Weight (kg)</label>
+                  <label className="form-label small mb-1">
+                    Weight (kg) {isRegistrationSessionForDefaultBen && '*'}
+                  </label>
                   <input
                     type="number"
                     step="0.1"
@@ -1002,21 +1096,29 @@ export default function LargeSessionCard({
                     placeholder="e.g. 14.5"
                     value={defaultWeight}
                     onChange={(e) => setDefaultWeight(e.target.value)}
-                    disabled={isLocked || isPending}
+                    disabled={isLocked || isPending || !defaultPresent}
+                    required={isRegistrationSessionForDefaultBen}
                   />
                 </div>
                 <div className="col-4">
-                  <label className="form-label small mb-1">Height (cm)</label>
+                  <label className="form-label small mb-1">
+                    Height (cm) {isRegistrationSessionForDefaultBen ? '*' : '(optional)'}
+                  </label>
                   <input
                     type="number"
                     step="0.1"
                     min="30"
                     max="250"
                     className="form-control form-control-sm"
-                    placeholder="e.g. 98.0"
+                    placeholder={
+                      !isRegistrationSessionForDefaultBen && defaultPriorEffectiveHeight.heightCm != null
+                        ? `Carried: ${defaultPriorEffectiveHeight.heightCm.toFixed(1)}`
+                        : 'e.g. 98.0'
+                    }
                     value={defaultHeight}
                     onChange={(e) => setDefaultHeight(e.target.value)}
-                    disabled={isLocked || isPending}
+                    disabled={isLocked || isPending || !defaultPresent}
+                    required={isRegistrationSessionForDefaultBen}
                   />
                 </div>
                 <div className="col-4">
@@ -1030,10 +1132,30 @@ export default function LargeSessionCard({
                     placeholder="e.g. 52.0"
                     value={defaultWaist}
                     onChange={(e) => setDefaultWaist(e.target.value)}
-                    disabled={isLocked || isPending}
+                    disabled={isLocked || isPending || !defaultPresent}
                   />
                 </div>
               </div>
+
+              {(liveDefaultBmi != null || liveDefaultWhtr != null || defaultPriorEffectiveHeight.heightCm != null) && (
+                <div className="small text-body-secondary mb-3 bb-num d-flex flex-wrap gap-3">
+                  {!parsedDefaultHeight && !isRegistrationSessionForDefaultBen && defaultPriorEffectiveHeight.heightCm != null && (
+                    <span>
+                      Carry-forward height: <strong>{defaultPriorEffectiveHeight.heightCm.toFixed(1)} cm</strong>
+                    </span>
+                  )}
+                  {liveDefaultBmi != null && (
+                    <span>
+                      Preview BMI: <strong>{liveDefaultBmi.toFixed(1)}</strong>
+                    </span>
+                  )}
+                  {liveDefaultWhtr != null && (
+                    <span>
+                      Preview WHtR: <strong>{liveDefaultWhtr.toFixed(2)}</strong>
+                    </span>
+                  )}
+                </div>
+              )}
 
               {/* Survey Ratings (1-5) */}
               <div className="border rounded-3 p-3 bg-light-subtle mb-3">
@@ -1153,6 +1275,48 @@ export default function LargeSessionCard({
                     <option value="male">Male</option>
                   </select>
                 </div>
+              </div>
+
+              {/* Required Initial Weight & Height */}
+              <div className="row g-2 mb-3">
+                <div className="col-6">
+                  <label className="form-label small mb-1">Initial Weight (kg) *</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="1"
+                    max="300"
+                    className="form-control form-control-sm"
+                    placeholder="e.g. 14.5"
+                    value={regWeightKg}
+                    onChange={(e) => setRegWeightKg(e.target.value)}
+                    disabled={isLocked || isPending}
+                    required
+                  />
+                </div>
+                <div className="col-6">
+                  <label className="form-label small mb-1">Initial Height (cm) *</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="30"
+                    max="250"
+                    className="form-control form-control-sm"
+                    placeholder="e.g. 98.0"
+                    value={regHeightCm}
+                    onChange={(e) => setRegHeightCm(e.target.value)}
+                    disabled={isLocked || isPending}
+                    required
+                  />
+                </div>
+                {liveRegBmiStatus && (
+                  <div className="col-12 small bb-num text-body-secondary">
+                    Initial BMI: <strong>{liveRegBmiStatus.bmi.toFixed(1)}</strong>{' '}
+                    <span className={`badge ${STATUS_BADGE_CLASS[liveRegBmiStatus.statusKey]} ms-1`}>
+                      {STATUS_LABEL[liveRegBmiStatus.statusKey]}
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Full Name (Optional) */}
@@ -1360,21 +1524,18 @@ export default function LargeSessionCard({
                   />
                 </div>
 
-                <div className="col-6 d-flex align-items-end">
-                  <div className="form-check form-switch mb-1">
-                    <input
-                      className="form-check-input"
-                      type="checkbox"
-                      role="switch"
-                      id="nutriEdemaSwitch"
-                      checked={nutriEdema}
-                      onChange={(e) => setNutriEdema(e.target.checked)}
-                      disabled={isLocked || isPending}
-                    />
-                    <label className="form-check-label small fw-semibold ms-1 text-danger" htmlFor="nutriEdemaSwitch">
-                      Bilateral Edema Present
-                    </label>
-                  </div>
+                <div className="col-6">
+                  <label className="form-label small fw-semibold">Edema Evaluation</label>
+                  <select
+                    className="form-select form-select-sm"
+                    value={nutriEdemaState}
+                    onChange={(e) => setNutriEdemaState(e.target.value as 'null' | 'false' | 'true')}
+                    disabled={isLocked || isPending}
+                  >
+                    <option value="null">Not checked (NULL — clears status)</option>
+                    <option value="false">No edema (Baseline)</option>
+                    <option value="true">Bilateral edema present (Monitor closely)</option>
+                  </select>
                 </div>
               </div>
 
@@ -1434,13 +1595,6 @@ export default function LargeSessionCard({
                 <strong>Absence Reconciliation:</strong> Any registered beneficiary without a record in this
                 session will automatically receive an <code>is_present = FALSE</code> check-in.
               </li>
-              {closingTimeline && (
-                <li className="text-success fw-semibold">
-                  <strong>Timeline {closingTimeline.seq} Closure:</strong> This session is the end session of
-                  Timeline {closingTimeline.seq}. Submitting will officially close Timeline {closingTimeline.seq},
-                  calculate qualifying nutritional statuses (Baseline / Monitor / Monitor closely), and store AI trend interpretations.
-                </li>
-              )}
             </ul>
 
             <div className="d-flex justify-content-end gap-2">

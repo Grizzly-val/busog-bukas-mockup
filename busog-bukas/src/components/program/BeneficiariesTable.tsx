@@ -2,9 +2,18 @@
 
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import type { BeneficiaryData, SessionData, TimelineData, BeneficiaryMeasurement } from '@/lib/programData';
+import type { BeneficiaryData, SessionData, ProgramWeekData, BeneficiaryMeasurement } from '@/lib/programData';
 import { formatDate } from '@/lib/format';
-import { STATUS_BADGE_CLASS, STATUS_LABEL, STATUS_SEVERITY, type StatusKey } from '@/lib/statusRule';
+import {
+  ALL_METRICS,
+  HEIGHT_NOTICE_MESSAGE,
+  METRIC_LABEL,
+  STATUS_BADGE_CLASS,
+  STATUS_LABEL,
+  STATUS_SEVERITY,
+  type StatusKey,
+} from '@/lib/statusRule';
+import { getWeekColor } from '@/lib/timelineRules';
 import {
   computeFirstToLatestDelta,
   filterBeneficiariesByCriteria,
@@ -16,15 +25,8 @@ import {
 type Props = {
   beneficiaries: BeneficiaryData[];
   today: string;
-  openTimelineWarning: {
-    active: boolean;
-    seq: number;
-    endDate: string;
-    daysLeft: number;
-    unmeasuredCount: number;
-  } | null;
   sessions?: SessionData[];
-  timelines?: TimelineData[];
+  weeks?: ProgramWeekData[];
 };
 
 type SortField =
@@ -60,19 +62,6 @@ function formatSummaryMean(mean: number | null, unit: 'kg' | 'cm'): string {
 
 const PAGE_SIZE = 15;
 
-const TIMELINE_TRACK_COLORS: Record<number, string> = {
-  1: '#2563eb', // Blue
-  2: '#9333ea', // Purple
-  3: '#0d9488', // Teal
-  4: '#d97706', // Amber
-  5: '#ec4899', // Pink
-  6: '#10b981', // Emerald
-};
-
-function getTrackColor(seq: number): string {
-  return TIMELINE_TRACK_COLORS[seq] ?? '#2563eb';
-}
-
 function formatMonthDay(dateStr: string): string {
   if (!dateStr) return '—';
   const [, m, d] = dateStr.slice(0, 10).split('-').map(Number);
@@ -82,9 +71,8 @@ function formatMonthDay(dateStr: string): string {
 
 export default function BeneficiariesTable({
   beneficiaries,
-  openTimelineWarning,
   sessions,
-  timelines,
+  weeks,
 }: Props) {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | StatusKey | 'none'>('all');
@@ -149,13 +137,13 @@ export default function BeneficiariesTable({
 
   // Map of sorted sessions to chronological session numbers (1, 2, 3...)
   const sessionChronologicalMap = useMemo(() => {
-    if (!sessions) return new Map<string, { sessionNum: number; owningSeq: number; isSubmitted: boolean }>();
+    if (!sessions) return new Map<string, { sessionNum: number; weekNum: number; isSubmitted: boolean }>();
     const sorted = [...sessions].sort((a, b) => a.session_date.localeCompare(b.session_date));
-    const map = new Map<string, { sessionNum: number; owningSeq: number; isSubmitted: boolean }>();
+    const map = new Map<string, { sessionNum: number; weekNum: number; isSubmitted: boolean }>();
     sorted.forEach((s, idx) => {
       map.set(s.session_id, {
         sessionNum: idx + 1,
-        owningSeq: s.owning_seq ?? 1,
+        weekNum: s.week_number ?? 1,
         isSubmitted: s.submitted_at != null,
       });
     });
@@ -166,21 +154,26 @@ export default function BeneficiariesTable({
     const fromMap = sessionChronologicalMap.get(m.session_id);
     if (fromMap) return fromMap;
 
-    let owningSeq = 1;
-    if (timelines) {
-      for (const tl of timelines) {
-        if (m.session_date >= tl.start_date && m.session_date <= tl.end_date) {
-          owningSeq = tl.seq;
+    let weekNum = m.week_number ?? 1;
+    if (weeks && !m.week_number) {
+      for (const wk of weeks) {
+        if (m.session_date >= wk.week_start_date && m.session_date <= wk.week_end_date) {
+          weekNum = wk.week_number;
           break;
         }
       }
     }
     return {
       sessionNum: idx + 1,
-      owningSeq,
+      weekNum,
       isSubmitted: m.submitted_at != null,
     };
   };
+
+  const needsMeasurementCount = useMemo(
+    () => beneficiaries.filter((b) => b.needs_measurement_warning).length,
+    [beneficiaries]
+  );
 
   // Beneficiaries matching the 5 cohort filters (ignoring the search box)
   const filterMatched = useMemo(() => {
@@ -277,16 +270,18 @@ export default function BeneficiariesTable({
           cmp = a.sex.localeCompare(b.sex);
           break;
         case 'status': {
-          const sevA = a.latest_status ? STATUS_SEVERITY[a.latest_status] : -1;
-          const sevB = b.latest_status ? STATUS_SEVERITY[b.latest_status] : -1;
-          cmp = sevA - sevB;
+          const maxSev = (ben: BeneficiaryData) => {
+            const vals = ALL_METRICS.map((m) => ben.latest_statuses[m]?.status_key).filter(Boolean) as StatusKey[];
+            return vals.length > 0 ? Math.max(...vals.map((s) => STATUS_SEVERITY[s])) : -1;
+          };
+          cmp = maxSev(a) - maxSev(b);
           break;
         }
         case 'bmi_optimality':
-          cmp = (a.bmi_optimality ?? -999) - (b.bmi_optimality ?? -999);
+          cmp = (a.latest_statuses.bmi?.change_value ?? -999) - (b.latest_statuses.bmi?.change_value ?? -999);
           break;
         case 'whtr_optimality':
-          cmp = (a.whtr_optimality ?? -999) - (b.whtr_optimality ?? -999);
+          cmp = (a.latest_statuses.whtr?.change_value ?? -999) - (b.latest_statuses.whtr?.change_value ?? -999);
           break;
         case 'weight_change':
           cmp = (a.weight_change ?? -999) - (b.weight_change ?? -999);
@@ -326,87 +321,20 @@ export default function BeneficiariesTable({
     return sortAsc ? ' ↑' : ' ↓';
   };
 
-  // Latest timeline with all submitted sessions (linked timeline for statuses)
-  const linkedTimeline = useMemo(() => {
-    if (!timelines || timelines.length === 0) return null;
-    const fullySubmitted = timelines.filter(
-      (tl) =>
-        tl.state === 'closed' ||
-        (tl.member_sessions.length > 0 && tl.member_sessions.every((s) => s.submitted_at != null))
-    );
-    if (fullySubmitted.length === 0) return null;
-    return fullySubmitted.reduce(
-      (latest, curr) => (curr.seq > latest.seq ? curr : latest),
-      fullySubmitted[0]
-    );
-  }, [timelines]);
-
   return (
     <div className="card bb-card overflow-hidden shadow-sm">
       <div className="card-header bg-white border-bottom p-3 p-md-4">
         <div className="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
           <div>
             <h2 className="h5 fw-bold mb-1 text-dark">Program Beneficiaries</h2>
-            <p className="text-body-secondary small mb-2">
-              Profiles, latest nutritional status, overall measurement change (first to latest), and attendance since enrollment.
+            <p className="text-body-secondary small mb-0">
+              Profiles, per-metric latest statuses (<code>v_latest_*</code>), measurement deltas, and attendance since registration.
             </p>
-            {linkedTimeline ? (
-              <div className="d-inline-flex flex-wrap align-items-center gap-2 px-3 py-1 rounded-pill bg-light border small text-body-secondary">
-                <span
-                  className="rounded-circle d-inline-block flex-shrink-0"
-                  style={{ width: '8px', height: '8px', backgroundColor: getTrackColor(linkedTimeline.seq) }}
-                />
-                <span>
-                  Linked to <strong className="text-dark">Timeline {linkedTimeline.seq}</strong> ({formatDate(linkedTimeline.start_date)} – {formatDate(linkedTimeline.end_date)}) —{' '}
-                  <span className="text-secondary">latest timeline with all submitted sessions</span>
-                </span>
-              </div>
-            ) : (
-              <div className="d-inline-flex align-items-center gap-2 px-3 py-1 rounded-pill bg-light border small text-body-secondary">
-                <span>No linked timeline yet — statuses link to the latest timeline once all its sessions are submitted.</span>
-              </div>
-            )}
           </div>
           <span className="badge rounded-pill text-bg-light border px-3 py-2">
             Total: <strong>{beneficiaries.length}</strong> enrolled
           </span>
         </div>
-
-        {/* Open Timeline Warning Infobox */}
-        {openTimelineWarning && openTimelineWarning.active && (
-          <div className="alert alert-warning border-0 p-3 mb-3 rounded-4 shadow-sm">
-            <div className="d-flex flex-wrap justify-content-between align-items-center gap-2">
-              <div className="d-flex align-items-center gap-3">
-                <span className="fs-3">⚠️</span>
-                <div>
-                  <h3 className="h6 fw-bold mb-0 text-dark">
-                    Open Timeline {openTimelineWarning.seq} Ending Soon
-                  </h3>
-                  <p className="small mb-0 text-dark-emphasis">
-                    Timeline {openTimelineWarning.seq} ends on {formatDate(openTimelineWarning.endDate)}{' '}
-                    ({openTimelineWarning.daysLeft} days remaining).{' '}
-                    <strong>{openTimelineWarning.unmeasuredCount}</strong> beneficiaries have no qualifying
-                    weight/height measurement in this Timeline yet.
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                className={`btn btn-sm rounded-pill ${
-                  warningOnly ? 'btn-dark' : 'btn-outline-dark'
-                }`}
-                onClick={() => {
-                  setWarningOnly(!warningOnly);
-                  setPage(1);
-                }}
-              >
-                {warningOnly
-                  ? 'Showing unmeasured (Clear filter)'
-                  : `Filter ${openTimelineWarning.unmeasuredCount} unmeasured`}
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* Search & Filter Toolbar */}
         <div className="d-flex flex-wrap align-items-center gap-2">
@@ -452,7 +380,6 @@ export default function BeneficiariesTable({
               <option value="baseline">Baseline</option>
               <option value="monitor">Monitor</option>
               <option value="monitor_closely">Monitor closely</option>
-              <option value="unavailable">Unavailable</option>
               <option value="none">No status yet</option>
             </select>
           </div>
@@ -554,8 +481,8 @@ export default function BeneficiariesTable({
             </div>
           </div>
 
-          {/* Warning Toggle */}
-          <div style={{ flex: '0 0 auto' }}>
+          {/* Warning Toggle + Last Measured X Sessions Ago Badge */}
+          <div className="d-inline-flex align-items-center gap-2" style={{ flex: '0 0 auto' }}>
             <button
               type="button"
               className={`btn btn-sm rounded-pill text-nowrap px-3 ${
@@ -568,6 +495,12 @@ export default function BeneficiariesTable({
             >
               Needs measurement
             </button>
+            <span
+              className="badge rounded-pill badge-pale-warning bb-num"
+              title="Beneficiaries last measured 1 or more submitted sessions ago"
+            >
+              Last measured ≥1 session ago ({needsMeasurementCount})
+            </span>
           </div>
 
           {/* Summarize Button */}
@@ -840,30 +773,26 @@ export default function BeneficiariesTable({
                 scope="col"
                 style={{ cursor: 'pointer' }}
                 onClick={() => handleSort('status')}
-                title={
-                  linkedTimeline
-                    ? `Linked to Timeline ${linkedTimeline.seq} (latest timeline with all submitted sessions)`
-                    : 'Latest evaluated timeline status'
-                }
+                title="Per-metric latest submitted nutritional statuses (BMI always, others if measured)"
               >
-                Latest Status{linkedTimeline ? ` (T${linkedTimeline.seq})` : ''}
+                Per-Metric Statuses
                 {sortIndicator('status')}
               </th>
               <th
                 scope="col"
                 style={{ cursor: 'pointer', width: '125px' }}
                 onClick={() => handleSort('bmi_optimality')}
-                title="How much closer (+) or farther (-) BMI moved toward the optimal value (1st to latest measurement)"
+                title="Latest signed BMI change toward (+) or away from (-) healthy range"
               >
-                BMI Optimality{sortIndicator('bmi_optimality')}
+                BMI Change{sortIndicator('bmi_optimality')}
               </th>
               <th
                 scope="col"
                 style={{ cursor: 'pointer', width: '125px' }}
                 onClick={() => handleSort('whtr_optimality')}
-                title="How much closer (+) or farther (-) WHtR moved toward the 0.47 optimal value (1st to latest measurement)"
+                title="Latest signed WHtR change toward (+) or away from (-) 0.47 optimal"
               >
-                WHtR Optimality{sortIndicator('whtr_optimality')}
+                WHtR Change{sortIndicator('whtr_optimality')}
               </th>
               <th
                 scope="col"
@@ -900,13 +829,8 @@ export default function BeneficiariesTable({
               </tr>
             ) : (
               pagedBeneficiaries.map((b) => {
-                const statusBadge = b.latest_status
-                  ? STATUS_BADGE_CLASS[b.latest_status]
-                  : 'text-bg-secondary';
-                const statusLabel = b.latest_status
-                  ? STATUS_LABEL[b.latest_status]
-                  : 'No status yet';
-
+                const bmiChangeVal = b.latest_statuses.bmi?.change_value ?? null;
+                const whtrChangeVal = b.latest_statuses.whtr?.change_value ?? null;
                 const weightDelta = computeFirstToLatestDelta(b.measurements, 'weight_kg');
                 const waistDelta = computeFirstToLatestDelta(b.measurements, 'waist_cm');
 
@@ -943,9 +867,26 @@ export default function BeneficiariesTable({
                           </span>
                         )}
 
-                        {b.needs_measurement_warning && (
-                          <span className="badge text-bg-warning ms-1" style={{ fontSize: '0.65rem' }}>
-                            ⚠️ Needs measurement
+                        {b.last_measured_sessions_ago != null && (
+                          <span
+                            className={`badge rounded-pill ms-1 bb-num ${
+                              b.last_measured_sessions_ago >= 1
+                                ? 'badge-pale-warning'
+                                : 'badge-pale-success'
+                            }`}
+                            style={{ fontSize: '0.65rem' }}
+                          >
+                            Last measured {b.last_measured_sessions_ago} session{b.last_measured_sessions_ago === 1 ? '' : 's'} ago
+                          </span>
+                        )}
+
+                        {b.height_notice && (
+                          <span
+                            className="badge rounded-pill badge-pale-warning ms-1"
+                            style={{ fontSize: '0.65rem' }}
+                            title={HEIGHT_NOTICE_MESSAGE}
+                          >
+                            Fresh height due
                           </span>
                         )}
                       </div>
@@ -960,42 +901,47 @@ export default function BeneficiariesTable({
                       <span className="text-capitalize small">{b.sex}</span>
                     </td>
                     <td>
-                      <div>
-                        <span
-                          className={`badge rounded-pill ${statusBadge}`}
-                          title={b.latest_status_reason ?? undefined}
-                        >
-                          {statusLabel}
-                        </span>
-                        {b.latest_status_reason_key && (
-                          <small
-                            className="text-body-secondary d-block text-truncate mt-1 fw-mono"
-                            style={{ fontSize: '0.68rem', maxWidth: '210px' }}
-                            title={b.latest_status_reason ?? b.latest_status_reason_key}
-                          >
-                            key: {b.latest_status_reason_key}
-                          </small>
+                      <div className="d-flex flex-wrap gap-1" style={{ maxWidth: '280px' }}>
+                        {ALL_METRICS.map((m) => {
+                          const st = b.latest_statuses[m];
+                          if (!st) return null;
+                          return (
+                            <span
+                              key={m}
+                              className={`badge rounded-pill ${STATUS_BADGE_CLASS[st.status_key]}`}
+                              style={{ fontSize: '0.7rem' }}
+                              title={`${METRIC_LABEL[m]}: ${st.latest_value_display} (${formatDate(st.session_date)})`}
+                            >
+                              {METRIC_LABEL[m]}: {STATUS_LABEL[st.status_key]}
+                              {st.is_outdated ? ' · Outdated' : ''}
+                            </span>
+                          );
+                        })}
+                        {ALL_METRICS.every((m) => !b.latest_statuses[m]) && (
+                          <span className="badge rounded-pill badge-pale-neutral text-muted">
+                            Pending 1st session
+                          </span>
                         )}
                       </div>
                     </td>
                     <td>
-                      {b.bmi_optimality != null ? (
+                      {bmiChangeVal != null ? (
                         <div>
                           <span
                             className={`fw-semibold small bb-num ${
-                              b.bmi_optimality > 0
+                              bmiChangeVal > 0
                                 ? 'text-success'
-                                : b.bmi_optimality < 0
+                                : bmiChangeVal < 0
                                 ? 'text-danger'
                                 : 'text-body-secondary'
                             }`}
-                            title="Movement toward (+) or away from (-) optimal BMI / Z-score (1st to latest)"
+                            title="Latest signed BMI status change (+ moved toward healthy, - moved away)"
                           >
-                            {b.bmi_optimality > 0 ? '↑ +' : b.bmi_optimality < 0 ? '↓ ' : '→ '}
-                            {b.bmi_optimality.toFixed(2)}
+                            {bmiChangeVal > 0 ? '↑ +' : bmiChangeVal < 0 ? '↓ ' : '→ '}
+                            {bmiChangeVal.toFixed(3)}
                           </span>
                           <small className="text-body-secondary d-block" style={{ fontSize: '0.67rem' }}>
-                            {b.bmi_optimality > 0 ? 'Closer' : b.bmi_optimality < 0 ? 'Farther' : 'Unchanged'}
+                            {bmiChangeVal > 0 ? 'Closer' : bmiChangeVal < 0 ? 'Farther' : 'Unchanged'}
                           </small>
                         </div>
                       ) : (
@@ -1003,23 +949,23 @@ export default function BeneficiariesTable({
                       )}
                     </td>
                     <td>
-                      {b.whtr_optimality != null ? (
+                      {whtrChangeVal != null ? (
                         <div>
                           <span
                             className={`fw-semibold small bb-num ${
-                              b.whtr_optimality > 0
+                              whtrChangeVal > 0
                                 ? 'text-success'
-                                : b.whtr_optimality < 0
+                                : whtrChangeVal < 0
                                 ? 'text-danger'
                                 : 'text-body-secondary'
                             }`}
-                            title="Movement toward (+) or away from (-) 0.47 optimal WHtR (1st to latest)"
+                            title="Latest signed WHtR status change (+ moved toward 0.47, - moved away)"
                           >
-                            {b.whtr_optimality > 0 ? '↑ +' : b.whtr_optimality < 0 ? '↓ ' : '→ '}
-                            {b.whtr_optimality.toFixed(2)}
+                            {whtrChangeVal > 0 ? '↑ +' : whtrChangeVal < 0 ? '↓ ' : '→ '}
+                            {whtrChangeVal.toFixed(3)}
                           </span>
                           <small className="text-body-secondary d-block" style={{ fontSize: '0.67rem' }}>
-                            {b.whtr_optimality > 0 ? 'Closer' : b.whtr_optimality < 0 ? 'Farther' : 'Unchanged'}
+                            {whtrChangeVal > 0 ? 'Closer' : whtrChangeVal < 0 ? 'Farther' : 'Unchanged'}
                           </small>
                         </div>
                       ) : (
@@ -1208,6 +1154,25 @@ export default function BeneficiariesTable({
                         <dt className="col-5 text-body-secondary">Registered:</dt>
                         <dd className="col-7">{formatDate(selectedBeneficiary.registered_session_date)}</dd>
 
+                        <dt className="col-5 text-body-secondary">Initial Weight / Height:</dt>
+                        <dd className="col-7 bb-num">
+                          {selectedBeneficiary.initial_weight_kg.toFixed(1)} kg · {selectedBeneficiary.initial_height_cm.toFixed(1)} cm
+                        </dd>
+
+                        <dt className="col-5 text-body-secondary">Effective Height:</dt>
+                        <dd className="col-7 bb-num">
+                          {selectedBeneficiary.effective_height_cm != null ? (
+                            <>
+                              {selectedBeneficiary.effective_height_cm.toFixed(1)} cm{' '}
+                              <span className="text-body-secondary">
+                                ({formatDate(selectedBeneficiary.effective_height_date)})
+                              </span>
+                            </>
+                          ) : (
+                            '—'
+                          )}
+                        </dd>
+
                         <dt className="col-5 text-body-secondary">Attendance:</dt>
                         <dd className="col-7 bb-num">
                           <strong>
@@ -1268,18 +1233,84 @@ export default function BeneficiariesTable({
                   </div>
                 </div>
 
-                {/* Nutritional Status & Deltas */}
+                {selectedBeneficiary.height_notice && (
+                  <div className="alert alert-warning border-0 p-3 rounded-4 mb-4 small">
+                    📏 <strong>Height Notice:</strong> {HEIGHT_NOTICE_MESSAGE}.
+                  </div>
+                )}
+
+                {/* Per-Metric Latest Statuses & Deltas */}
                 <div className="bg-light-subtle rounded-4 p-3 border mb-4">
-                  <div className="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                  <div className="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
                     <h4 className="h6 text-uppercase text-body-secondary small fw-bold mb-0">
-                      Latest Nutritional Status &amp; Changes
+                      Latest Per-Metric Statuses &amp; Changes
                     </h4>
-                    {selectedBeneficiary.latest_status_timeline_seq != null && (
-                      <span className="badge rounded-pill bg-light text-secondary border" style={{ fontSize: '0.7rem' }}>
-                        Evaluated at Timeline {selectedBeneficiary.latest_status_timeline_seq}
+                    {selectedBeneficiary.last_measured_sessions_ago != null && (
+                      <span
+                        className={`badge rounded-pill bb-num ${
+                          selectedBeneficiary.last_measured_sessions_ago >= 1
+                            ? 'badge-pale-warning'
+                            : 'badge-pale-success'
+                        }`}
+                      >
+                        Last measured {selectedBeneficiary.last_measured_sessions_ago} session
+                        {selectedBeneficiary.last_measured_sessions_ago === 1 ? '' : 's'} ago
                       </span>
                     )}
                   </div>
+
+                  {/* Per-metric cards */}
+                  <div className="row row-cols-1 row-cols-sm-2 row-cols-lg-4 g-2 mb-3">
+                    {ALL_METRICS.map((m) => {
+                      const st = selectedBeneficiary.latest_statuses[m];
+                      return (
+                        <div key={m} className="col">
+                          <div className="bg-white border rounded-3 p-2 h-100">
+                            <div className="d-flex justify-content-between align-items-center mb-1">
+                              <span className="small fw-bold text-dark">{METRIC_LABEL[m]}</span>
+                              {st ? (
+                                <span className={`badge ${STATUS_BADGE_CLASS[st.status_key]}`}>
+                                  {STATUS_LABEL[st.status_key]}
+                                </span>
+                              ) : (
+                                <span className="badge badge-pale-neutral text-muted">No status</span>
+                              )}
+                            </div>
+                            {st ? (
+                              <div className="small bb-num">
+                                <div className="text-dark fw-semibold">{st.latest_value_display}</div>
+                                <div className="text-body-secondary" style={{ fontSize: '0.72rem' }}>
+                                  {formatDate(st.session_date)}
+                                  {st.is_outdated && (
+                                    <span className="text-warning-emphasis ms-1">(Outdated · {st.days_old}d)</span>
+                                  )}
+                                </div>
+                                {st.change_value != null && (
+                                  <div
+                                    className={
+                                      st.change_value > 0
+                                        ? 'text-success'
+                                        : st.change_value < 0
+                                        ? 'text-danger'
+                                        : 'text-body-secondary'
+                                    }
+                                    style={{ fontSize: '0.72rem' }}
+                                  >
+                                    Change: {st.change_value > 0 ? `+${st.change_value.toFixed(3)}` : st.change_value.toFixed(3)}
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="text-body-secondary" style={{ fontSize: '0.75rem' }}>
+                                Not yet measured
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
                   {(() => {
                     const modalWeightDelta = computeFirstToLatestDelta(
                       selectedBeneficiary.measurements,
@@ -1295,88 +1326,9 @@ export default function BeneficiariesTable({
                     );
 
                     return (
-                      <div className="row row-cols-2 row-cols-md-3 row-cols-xl-6 g-3 align-items-center">
+                      <div className="row row-cols-1 row-cols-sm-3 g-3 pt-2 border-top align-items-center">
                         <div className="col">
-                          <span className="small text-body-secondary d-block">Status:</span>
-                          <span
-                            className={`badge rounded-pill ${
-                              selectedBeneficiary.latest_status
-                                ? STATUS_BADGE_CLASS[selectedBeneficiary.latest_status]
-                                : 'text-bg-secondary'
-                            }`}
-                            title={selectedBeneficiary.latest_status_reason ?? undefined}
-                          >
-                            {selectedBeneficiary.latest_status
-                              ? STATUS_LABEL[selectedBeneficiary.latest_status]
-                              : 'No status yet'}
-                          </span>
-                        </div>
-
-                        <div className="col">
-                          <span
-                            className="small text-body-secondary d-block"
-                            title="Movement toward (+) or away from (-) the optimal BMI / Z-score (1st to latest)"
-                          >
-                            BMI Optimality (1st → Latest):
-                          </span>
-                          <strong
-                            className={`small bb-num ${
-                              selectedBeneficiary.bmi_optimality != null
-                                ? selectedBeneficiary.bmi_optimality > 0
-                                  ? 'text-success'
-                                  : selectedBeneficiary.bmi_optimality < 0
-                                  ? 'text-danger'
-                                  : 'text-dark'
-                                : 'text-dark'
-                            }`}
-                          >
-                            {selectedBeneficiary.bmi_optimality != null
-                              ? `${selectedBeneficiary.bmi_optimality > 0 ? '+' : ''}${selectedBeneficiary.bmi_optimality.toFixed(2)} (${
-                                  selectedBeneficiary.bmi_optimality > 0
-                                    ? 'Closer'
-                                    : selectedBeneficiary.bmi_optimality < 0
-                                    ? 'Farther'
-                                    : 'Same'
-                                })`
-                              : '—'}
-                          </strong>
-                        </div>
-
-                        <div className="col">
-                          <span
-                            className="small text-body-secondary d-block"
-                            title="Movement toward (+) or away from (-) the 0.47 optimal WHtR (1st to latest)"
-                          >
-                            WHtR Optimality (1st → Latest):
-                          </span>
-                          <strong
-                            className={`small bb-num ${
-                              selectedBeneficiary.whtr_optimality != null
-                                ? selectedBeneficiary.whtr_optimality > 0
-                                  ? 'text-success'
-                                  : selectedBeneficiary.whtr_optimality < 0
-                                  ? 'text-danger'
-                                  : 'text-dark'
-                                : 'text-dark'
-                            }`}
-                          >
-                            {selectedBeneficiary.whtr_optimality != null
-                              ? `${selectedBeneficiary.whtr_optimality > 0 ? '+' : ''}${selectedBeneficiary.whtr_optimality.toFixed(2)} (${
-                                  selectedBeneficiary.whtr_optimality > 0
-                                    ? 'Closer'
-                                    : selectedBeneficiary.whtr_optimality < 0
-                                    ? 'Farther'
-                                    : 'Same'
-                                })`
-                              : '—'}
-                          </strong>
-                        </div>
-
-                        <div className="col">
-                          <span
-                            className="small text-body-secondary d-block"
-                            title="Latest valid weight (kg) minus first valid weight (kg) across present sessions"
-                          >
+                          <span className="small text-body-secondary d-block">
                             Weight Change (1st → Latest):
                           </span>
                           <strong className="small bb-num text-secondary-emphasis">
@@ -1391,10 +1343,7 @@ export default function BeneficiariesTable({
                         </div>
 
                         <div className="col">
-                          <span
-                            className="small text-body-secondary d-block"
-                            title="Latest valid waist circumference (cm) minus first valid waist circumference (cm) across present sessions"
-                          >
+                          <span className="small text-body-secondary d-block">
                             Waist Change (1st → Latest):
                           </span>
                           <strong className="small bb-num text-secondary-emphasis">
@@ -1405,10 +1354,7 @@ export default function BeneficiariesTable({
                         </div>
 
                         <div className="col">
-                          <span
-                            className="small text-body-secondary d-block"
-                            title="Latest valid MUAC (cm) minus first valid MUAC (cm) across present sessions"
-                          >
+                          <span className="small text-body-secondary d-block">
                             MUAC Change (1st → Latest):
                           </span>
                           <strong className="small bb-num text-secondary-emphasis">
@@ -1420,43 +1366,26 @@ export default function BeneficiariesTable({
                       </div>
                     );
                   })()}
-
-                  {selectedBeneficiary.latest_status_reason && (
-                    <div className="mt-3 pt-2 border-top d-flex flex-wrap align-items-center gap-2">
-                      <span className="small text-body-secondary fw-semibold" style={{ fontSize: '0.75rem' }}>
-                        Status Reason:
-                      </span>
-                      {selectedBeneficiary.latest_status_reason_key && (
-                        <span className="badge rounded-pill bg-light text-dark border fw-mono" style={{ fontSize: '0.72rem' }}>
-                          {selectedBeneficiary.latest_status_reason_key}
-                        </span>
-                      )}
-                      <span className="small text-dark fw-medium" style={{ fontSize: '0.8rem' }}>
-                        {selectedBeneficiary.latest_status_reason}
-                      </span>
-                    </div>
-                  )}
                 </div>
 
-                {/* Measurement & Attendance History Table with Timeline Track & Edema */}
+                {/* Measurement & Attendance History Table with Program Week Track & Edema */}
                 <div>
                   <div className="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
                     <h4 className="h6 text-uppercase text-body-secondary small fw-bold mb-0">
                       Measurement &amp; Attendance History
                     </h4>
 
-                    {/* Inline Color Legend for Timelines */}
                     <div className="d-flex flex-wrap align-items-center gap-3 small">
                       <span className="text-body-secondary fw-semibold" style={{ fontSize: '0.72rem' }}>
-                        Timeline Track:
+                        Program Weeks:
                       </span>
-                      {(timelines && timelines.length > 0 ? timelines : [{ seq: 1 }, { seq: 2 }]).map((t) => (
-                        <span key={t.seq} className="d-inline-flex align-items-center gap-1" style={{ fontSize: '0.72rem' }}>
+                      {(weeks && weeks.length > 0 ? weeks : [{ week_number: 1 }]).map((wk) => (
+                        <span key={wk.week_number} className="d-inline-flex align-items-center gap-1" style={{ fontSize: '0.72rem' }}>
                           <span
                             className="rounded-circle d-inline-block"
-                            style={{ width: '8px', height: '8px', backgroundColor: getTrackColor(t.seq) }}
+                            style={{ width: '8px', height: '8px', backgroundColor: getWeekColor(wk.week_number).hex }}
                           />
-                          <span className="fw-medium text-dark">Timeline {t.seq}</span>
+                          <span className="fw-medium text-dark">Week {wk.week_number}</span>
                         </span>
                       ))}
                     </div>
@@ -1469,12 +1398,12 @@ export default function BeneficiariesTable({
                       <table className="table table-sm table-bordered align-middle small mb-0">
                         <thead className="table-light">
                           <tr className="text-secondary small">
-                            <th className="text-center align-middle" style={{ width: '56px' }}>⏳</th>
-                            <th className="text-center align-middle" style={{ width: '56px' }}>📝</th>
+                            <th className="text-center align-middle" style={{ width: '56px' }}>Wk</th>
+                            <th className="text-center align-middle" style={{ width: '56px' }}>#</th>
                             <th style={{ minWidth: '100px' }}>Date</th>
                             <th style={{ minWidth: '85px' }}>Status</th>
                             <th className="text-end" style={{ minWidth: '90px' }}>Weight (kg)</th>
-                            <th className="text-end" style={{ minWidth: '90px' }}>Height (cm)</th>
+                            <th className="text-end" style={{ minWidth: '110px' }}>Height (cm)</th>
                             <th className="text-end" style={{ minWidth: '90px' }}>Waist (cm)</th>
                             <th className="text-end" style={{ minWidth: '70px' }}>BMI</th>
                             <th className="text-end" style={{ minWidth: '90px' }}>MUAC (cm)</th>
@@ -1485,26 +1414,25 @@ export default function BeneficiariesTable({
                         <tbody>
                           {selectedBeneficiary.measurements.map((m, idx) => {
                             const meta = getMeasurementMeta(m, idx);
-                            const currSeq = meta.owningSeq;
-                            const prevSeq =
+                            const currWeek = meta.weekNum;
+                            const prevWeek =
                               idx > 0
-                                ? getMeasurementMeta(selectedBeneficiary.measurements[idx - 1], idx - 1).owningSeq
+                                ? getMeasurementMeta(selectedBeneficiary.measurements[idx - 1], idx - 1).weekNum
                                 : null;
-                            const isNewTimeline = idx === 0 || prevSeq !== currSeq;
-                            const currColor = getTrackColor(currSeq);
-                            const prevColor = prevSeq != null ? getTrackColor(prevSeq) : currColor;
+                            const isNewWeek = idx === 0 || prevWeek !== currWeek;
+                            const currColor = getWeekColor(currWeek).hex;
+                            const prevColor = prevWeek != null ? getWeekColor(prevWeek).hex : currColor;
                             const isFirstRow = idx === 0;
                             const isLastRow = idx === selectedBeneficiary.measurements.length - 1;
                             const isSubmitted = meta.isSubmitted;
 
                             return (
                               <tr key={m.session_id}>
-                                {/* Column 1: Timeline Track */}
+                                {/* Column 1: Week Track */}
                                 <td
                                   className="position-relative text-center align-middle p-0"
                                   style={{ width: '56px', height: '52px' }}
                                 >
-                                  {/* Top half connector line */}
                                   {!isFirstRow && (
                                     <div
                                       className="position-absolute start-50 translate-middle-x"
@@ -1512,13 +1440,12 @@ export default function BeneficiariesTable({
                                         width: '4px',
                                         top: 0,
                                         height: '50%',
-                                        backgroundColor: isNewTimeline ? prevColor : currColor,
+                                        backgroundColor: isNewWeek ? prevColor : currColor,
                                         zIndex: 1,
                                       }}
                                     />
                                   )}
 
-                                  {/* Bottom half connector line */}
                                   {!isLastRow && (
                                     <div
                                       className="position-absolute start-50 translate-middle-x"
@@ -1532,8 +1459,7 @@ export default function BeneficiariesTable({
                                     />
                                   )}
 
-                                  {/* Node badge or dot */}
-                                  {isNewTimeline ? (
+                                  {isNewWeek ? (
                                     <span
                                       className="position-relative d-inline-flex align-items-center justify-content-center rounded-circle text-white fw-bold shadow-sm"
                                       style={{
@@ -1541,11 +1467,11 @@ export default function BeneficiariesTable({
                                         height: '28px',
                                         backgroundColor: currColor,
                                         zIndex: 2,
-                                        fontSize: '0.8rem',
+                                        fontSize: '0.72rem',
                                       }}
-                                      title={`Timeline ${currSeq}`}
+                                      title={`Week ${currWeek}`}
                                     >
-                                      {currSeq}
+                                      W{currWeek}
                                     </span>
                                   ) : (
                                     <span
@@ -1557,7 +1483,7 @@ export default function BeneficiariesTable({
                                         border: `2px solid ${currColor}`,
                                         zIndex: 2,
                                       }}
-                                      title={`Session ${meta.sessionNum} (Timeline ${currSeq})`}
+                                      title={`Session ${meta.sessionNum} (Week ${currWeek})`}
                                     />
                                   )}
                                 </td>
@@ -1573,7 +1499,7 @@ export default function BeneficiariesTable({
                                   <span className="fw-semibold">{formatMonthDay(m.session_date)}</span>
                                 </td>
 
-                                {/* Column 4: Status */}
+                                {/* Column 4: Attendance */}
                                 <td className="align-middle">
                                   {m.is_present ? (
                                     <span className="badge rounded-pill badge-pale-success">Present</span>
@@ -1587,9 +1513,17 @@ export default function BeneficiariesTable({
                                   {m.weight_kg != null ? `${m.weight_kg.toFixed(1)}` : '—'}
                                 </td>
 
-                                {/* Column 6: Height */}
+                                {/* Column 6: Height (explicit or carried forward) */}
                                 <td className="text-end align-middle bb-num">
-                                  {m.height_cm != null ? `${m.height_cm.toFixed(1)}` : '—'}
+                                  {m.height_cm != null ? (
+                                    `${m.height_cm.toFixed(1)}`
+                                  ) : m.effective_height_cm != null && m.height_carried_forward ? (
+                                    <span className="text-body-secondary" title={`Carried forward from ${formatDate(m.effective_height_date)}`}>
+                                      {m.effective_height_cm.toFixed(1)} (c)
+                                    </span>
+                                  ) : (
+                                    '—'
+                                  )}
                                 </td>
 
                                 {/* Column 7: Waist */}

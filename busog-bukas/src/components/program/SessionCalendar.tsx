@@ -3,18 +3,18 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import type {
   SessionData,
-  TimelineData,
+  ProgramWeekData,
   BeneficiaryData,
   AvailableAllergy,
   AssignedNutritionist,
   SurveyQuestion,
 } from '@/lib/programData';
-import { SESSION_STATE_META, getTimelineColor } from '@/lib/timelineRules';
+import { getWeekColor } from '@/lib/timelineRules';
 import LargeSessionCard from './LargeSessionCard';
 
 type Props = {
   sessions: SessionData[];
-  timelines: TimelineData[];
+  weeks: ProgramWeekData[];
   startDate: string;
   endDate: string;
   today: string;
@@ -34,7 +34,7 @@ const MONTH_NAMES = [
 
 export default function SessionCalendar({
   sessions,
-  timelines,
+  weeks,
   startDate,
   endDate,
   today,
@@ -138,20 +138,8 @@ export default function SessionCalendar({
     return map;
   }, [sessions]);
 
-  const boundaryDatesMap = useMemo(() => {
-    const map = new Map<string, { endsSeq: number; startsSeq: number }>();
-    for (let i = 0; i < timelines.length; i++) {
-      const cur = timelines[i];
-      const next = timelines[i + 1];
-      if (next && cur.end_date === next.start_date) {
-        map.set(cur.end_date, { endsSeq: cur.seq, startsSeq: next.seq });
-      }
-    }
-    return map;
-  }, [timelines]);
-
-  const getTimelinesForDate = (dateStr: string) => {
-    return timelines.filter((t) => dateStr >= t.start_date && dateStr <= t.end_date);
+  const getWeekForDate = (dateStr: string) => {
+    return weeks.find((w) => dateStr >= w.week_start_date && dateStr <= w.week_end_date) ?? null;
   };
 
   return (
@@ -165,16 +153,16 @@ export default function SessionCalendar({
               <p className="text-body-secondary small mb-2">
                 Click any session to view its live statistics, records, and data inputs in an overlay modal.
               </p>
-              {timelines.length > 0 && (
+              {weeks.length > 0 && (
                 <div className="d-flex flex-wrap align-items-center gap-2 mt-1">
                   <span className="text-body-secondary small fw-medium" style={{ fontSize: '0.72rem' }}>
-                    Timelines:
+                    Weeks:
                   </span>
-                  {timelines.map((tl) => {
-                    const theme = getTimelineColor(tl.seq);
+                  {weeks.map((wk) => {
+                    const theme = getWeekColor(wk.week_number);
                     return (
                       <span
-                        key={tl.timeline_id}
+                        key={wk.week_id}
                         className="badge rounded-pill d-inline-flex align-items-center gap-1 px-2 py-1"
                         style={{
                           backgroundColor: theme.bgSoft,
@@ -187,7 +175,7 @@ export default function SessionCalendar({
                           className="rounded-circle d-inline-block"
                           style={{ width: '7px', height: '7px', backgroundColor: theme.hex }}
                         />
-                        Timeline {tl.seq}
+                        Week {wk.week_number}
                       </span>
                     );
                   })}
@@ -270,34 +258,32 @@ export default function SessionCalendar({
                       const dateStr = `${selectedMonth}-${String(dayNumber).padStart(2, '0')}`;
                       const inProgramRange = dateStr >= startDate && dateStr <= endDate;
                       const session = sessionsByDate.get(dateStr);
-                      const coveringTimelines = getTimelinesForDate(dateStr);
-                      const boundaryInfo = boundaryDatesMap.get(dateStr);
+                      const coveringWeek = getWeekForDate(dateStr);
                       const isToday = dateStr === today;
                       const isModalActive = session && session.session_id === modalSessionId;
 
-                      const primaryTl = coveringTimelines[0];
-                      const owningSeq = session?.owning_seq ?? (boundaryInfo ? boundaryInfo.endsSeq : primaryTl?.seq);
-                      const tlTheme = owningSeq ? getTimelineColor(owningSeq) : (primaryTl ? getTimelineColor(primaryTl.seq) : null);
+                      const weekNumber = session?.week_number ?? coveringWeek?.week_number ?? null;
+                      const wkTheme = weekNumber ? getWeekColor(weekNumber) : null;
 
                       let cellBg = '#ffffff';
                       let cellBorder = '1px solid rgba(0, 0, 0, 0.06)';
 
-                      if (primaryTl && inProgramRange) {
-                        cellBg = tlTheme?.bgSoft ?? '#f8faf8';
-                        cellBorder = `1px solid ${tlTheme?.borderSoft ?? 'rgba(0, 0, 0, 0.08)'}`;
+                      if (coveringWeek && inProgramRange) {
+                        cellBg = wkTheme?.bgSoft ?? '#f8faf8';
+                        cellBorder = `1px solid ${wkTheme?.borderSoft ?? 'rgba(0, 0, 0, 0.08)'}`;
                       }
 
                       if (isModalActive) {
-                        cellBorder = `2px solid ${tlTheme?.hex ?? '#198754'}`;
+                        cellBorder = `2px solid ${wkTheme?.hex ?? '#198754'}`;
                       } else if (session) {
                         if (session.state === 'submitted') {
-                          cellBorder = `1.5px solid ${tlTheme?.borderSoft ?? 'rgba(25, 135, 84, 0.35)'}`;
+                          cellBorder = `1.5px solid ${wkTheme?.borderSoft ?? 'rgba(25, 135, 84, 0.35)'}`;
                         } else if (session.state === 'draft') {
                           cellBorder = '1.5px solid rgba(245, 158, 11, 0.75)';
                         } else if (session.state === 'skipped') {
                           cellBorder = '1px solid rgba(108, 117, 125, 0.35)';
                         } else if (session.state === 'upcoming') {
-                          cellBorder = `1.5px dashed ${tlTheme?.borderSoft ?? 'rgba(0, 0, 0, 0.25)'}`;
+                          cellBorder = `1.5px dashed ${wkTheme?.borderSoft ?? 'rgba(0, 0, 0, 0.25)'}`;
                         }
                       }
 
@@ -329,30 +315,18 @@ export default function SessionCalendar({
                               {dayNumber}
                             </span>
 
-                            {boundaryInfo ? (
-                              <span
-                                className="badge rounded-pill text-white shadow-sm"
-                                style={{
-                                  fontSize: '0.62rem',
-                                  padding: '0.2rem 0.45rem',
-                                  backgroundColor: tlTheme?.hex ?? '#212529',
-                                }}
-                                title={`Boundary handover: Closes T${boundaryInfo.endsSeq}, Starts T${boundaryInfo.startsSeq}`}
-                              >
-                                T{boundaryInfo.endsSeq} ⇄ T{boundaryInfo.startsSeq}
-                              </span>
-                            ) : coveringTimelines.length > 0 && inProgramRange ? (
+                            {weekNumber != null && inProgramRange ? (
                               <span
                                 className="badge rounded-pill shadow-sm"
                                 style={{
                                   fontSize: '0.62rem',
-                                  backgroundColor: tlTheme?.hex ?? '#6c757d',
+                                  backgroundColor: wkTheme?.hex ?? '#6c757d',
                                   color: '#fff',
                                   padding: '0.2rem 0.45rem',
                                 }}
-                                title={`Timeline ${owningSeq ?? primaryTl.seq}`}
+                                title={`Week ${weekNumber}`}
                               >
-                                T{owningSeq ?? primaryTl.seq}
+                                W{weekNumber}
                               </span>
                             ) : null}
                           </div>
@@ -432,7 +406,7 @@ export default function SessionCalendar({
           availableAllergies={availableAllergies}
           assignedNutritionists={assignedNutritionists}
           surveyQuestions={surveyQuestions}
-          timelines={timelines}
+          weeks={weeks}
           today={today}
           onClose={closeSessionModal}
         />

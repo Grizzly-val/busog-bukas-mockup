@@ -96,7 +96,10 @@ export type BeneficiaryFilterCriteria = {
 };
 
 export type FilterableBeneficiaryRow = {
-  latest_status: 'baseline' | 'monitor' | 'monitor_closely' | 'unavailable' | null;
+  latest_status?: 'baseline' | 'monitor' | 'monitor_closely' | 'unavailable' | null;
+  metric_statuses?: Partial<
+    Record<'bmi' | 'whtr' | 'muac' | 'edema', { status_key: 'baseline' | 'monitor' | 'monitor_closely' } | null>
+  >;
   isAdult: boolean;
   sex: 'female' | 'male';
   needs_measurement_warning: boolean;
@@ -136,8 +139,17 @@ export function filterBeneficiariesByCriteria<T extends FilterableBeneficiaryRow
 
   return rows.filter((b) => {
     if (statusFilter !== 'all') {
-      if (statusFilter === 'none') {
-        if (b.latest_status !== null) return false;
+      if (b.metric_statuses) {
+        const statuses = Object.values(b.metric_statuses)
+          .filter((s): s is { status_key: 'baseline' | 'monitor' | 'monitor_closely' } => s != null)
+          .map((s) => s.status_key);
+        if (statusFilter === 'none') {
+          if (statuses.length > 0) return false;
+        } else if (!statuses.includes(statusFilter as 'baseline' | 'monitor' | 'monitor_closely')) {
+          return false;
+        }
+      } else if (statusFilter === 'none') {
+        if ((b.latest_status ?? null) !== null) return false;
       } else if (b.latest_status !== statusFilter) {
         return false;
       }

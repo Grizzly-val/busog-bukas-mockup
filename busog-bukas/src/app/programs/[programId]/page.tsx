@@ -4,7 +4,8 @@ import { getOrgContext } from '@/lib/orgContext';
 import { PHASE_BADGE, formatDate, programPhase } from '@/lib/format';
 import { getProgramPageData } from '@/lib/programData';
 import SessionCalendar from '@/components/program/SessionCalendar';
-import TimelinesSection from '@/components/program/TimelinesSection';
+import WeeksOfProgramSection from '@/components/program/TimelinesSection';
+import NutritionalStatusSection from '@/components/program/NutritionalStatusSection';
 import BeneficiariesTable from '@/components/program/BeneficiariesTable';
 
 type PageProps = {
@@ -65,19 +66,19 @@ async function ProgramContent({
   const {
     program,
     sessions,
-    timelines,
+    weeks,
+    nutritionalStatus,
     beneficiaries,
     availableAllergies,
     assignedNutritionists,
     surveyQuestions,
     today,
-    openTimelineWarning,
   } = data;
   const phase = programPhase(program.start_date, program.end_date, today);
   const badge = PHASE_BADGE[phase];
   const submittedCount = sessions.filter((s) => s.submitted_at != null).length;
-  const closedTimelinesCount = timelines.filter((t) => t.state === 'closed').length;
-  const openTimelinesCount = timelines.filter((t) => t.state === 'open').length;
+  const completedWeeksCount = weeks.filter((w) => w.state === 'completed').length;
+  const activeWeeksCount = weeks.filter((w) => w.state === 'current').length;
 
   return (
     <>
@@ -136,9 +137,9 @@ async function ProgramContent({
             subtitle="Sessions submitted"
           />
           <Stat
-            label="Timelines"
-            value={`${program.timeline_total} Timelines`}
-            subtitle={`${closedTimelinesCount} closed, ${openTimelinesCount} open`}
+            label="Program Weeks"
+            value={`${program.week_total} Weeks`}
+            subtitle={`${completedWeeksCount} completed, ${activeWeeksCount} active`}
           />
         </div>
       </div>
@@ -147,7 +148,7 @@ async function ProgramContent({
       <section className="mb-4">
         <SessionCalendar
           sessions={sessions}
-          timelines={timelines}
+          weeks={weeks}
           startDate={program.start_date}
           endDate={program.end_date}
           today={today}
@@ -160,19 +161,31 @@ async function ProgramContent({
         />
       </section>
 
-      {/* 3. Timelines Section */}
+      {/* 3. Weeks of the Program Section */}
       <section className="mb-4">
-        <TimelinesSection timelines={timelines} beneficiaries={beneficiaries} today={today} />
+        <WeeksOfProgramSection
+          weeks={weeks}
+          hasNutritionist={program.nutritionist_count > 0}
+          today={today}
+        />
       </section>
 
-      {/* 4. Beneficiaries Table Section */}
+      {/* 4. Program Nutritional Status Section */}
+      <section className="mb-4">
+        <NutritionalStatusSection
+          nutritionalStatus={nutritionalStatus}
+          beneficiaries={beneficiaries}
+          today={today}
+        />
+      </section>
+
+      {/* 5. Beneficiaries Table Section */}
       <section className="mb-5">
         <BeneficiariesTable
           beneficiaries={beneficiaries}
           today={today}
-          openTimelineWarning={openTimelineWarning}
           sessions={sessions}
-          timelines={timelines}
+          weeks={weeks}
         />
       </section>
     </>

@@ -9,13 +9,236 @@ import { withTransaction, query } from '@/lib/db';
 import { getMockToday } from '@/lib/mockToday';
 import {
   ageInMonths,
-  classifyStatus,
-  summarizeTimeline,
-  computeTimelineChanges,
-  type SessionMeasurement,
+  classifyBmiStatus,
+  classifyEdemaStatus,
+  classifyMuacStatus,
+  classifyWhtrStatus,
+  computeBmiSignedChange,
+  computeMuacSignedChange,
+  computeWhtrSignedChange,
+  resolveEffectiveHeight,
+  type Sex,
 } from '@/lib/statusRule';
-import { formatDate } from '@/lib/format';
-import { isSessionOwnedByTimeline } from '@/lib/timelineRules';
+
+function toNumOrNull(val: unknown): number | null {
+  if (val === null || val === undefined || val === '') return null;
+  const n = Number(val);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Recomputes and syncs a single beneficiary's per-metric status rows
+ * (`beneficiary_bmi_status`, `beneficiary_whtr_status`, `beneficiary_muac_status`,
+ * `beneficiary_edema_status`) across all of their sessions in the program,
+ * ordered chronologically by `program_session.session_date`.
+ *
+ * This guarantees on every save (draft or submitted) that:
+ * - Present source measurements upsert their status row.
+ * - Cleared measurements (or is_present = FALSE) delete their status row.
+ * - Carry-forward height and all subsequent `*_change` values stay accurate.
+ */
+async function syncBeneficiarySessionStatuses(
+  conn: PoolConnection,
+  programId: string,
+  beneficiaryCode: string
+): Promise<void> {
+  const [benRows]: [RowDataPacket[], unknown] = await conn.query(
+    `SELECT b.beneficiary_code, b.birth_month, b.birth_year, b.sex,
+            b.initial_height_cm, b.initial_weight_kg, b.registered_session_id,
+            DATE_FORMAT(ps_reg.session_date, '%Y-%m-%d') AS registration_date
+       FROM beneficiary b
+       JOIN program_session ps_reg
+         ON ps_reg.session_id = b.registered_session_id
+        AND ps_reg.program_id = b.program_id
+      WHERE b.program_id = ? AND b.beneficiary_code = ?
+      LIMIT 1`,
+    [programId, beneficiaryCode]
+  );
+
+  if (benRows.length === 0) return;
+  const ben = benRows[0] as {
+    beneficiary_code: string;
+    birth_month: number;
+    birth_year: number;
+    sex: Sex;
+    initial_height_cm: number | string;
+    initial_weight_kg: number | string;
+    registered_session_id: string;
+    registration_date: string;
+  };
+
+  const [sessionRows]: [RowDataPacket[], unknown] = await conn.query(
+    `SELECT sr.session_id,
+            DATE_FORMAT(ps.session_date, '%Y-%m-%d') AS session_date,
+            sr.is_present, sr.weight_kg, sr.height_cm, sr.waist_cm,
+            nr.muac_cm, nr.edema
+       FROM session_record sr
+       JOIN program_session ps
+         ON ps.session_id = sr.session_id AND ps.program_id = sr.program_id
+       LEFT JOIN nutritionist_record nr
+         ON nr.session_id = sr.session_id
+        AND nr.program_id = sr.program_id
+        AND nr.beneficiary_code = sr.beneficiary_code
+      WHERE sr.program_id = ? AND sr.beneficiary_code = ?
+      ORDER BY ps.session_date ASC, sr.session_id ASC`,
+    [programId, beneficiaryCode]
+  );
+
+  const priorHeights: Array<{ sessionDate: string; heightCm: number }> = [];
+  const initialHeightCm = toNumOrNull(ben.initial_height_cm);
+
+  let prevBmi: { bmi: number; sessionDate: string } | null = null;
+  let prevWhtr: number | null = null;
+  let prevMuac: number | null = null;
+
+  for (const raw of sessionRows) {
+    const sessionId = String(raw.session_id);
+    const sessionDate = String(raw.session_date).slice(0, 10);
+    const isPresent = Boolean(raw.is_present);
+
+    if (!isPresent) {
+      await conn.query(
+        'DELETE FROM beneficiary_bmi_status WHERE session_id = ? AND program_id = ? AND beneficiary_code = ?',
+        [sessionId, programId, beneficiaryCode]
+      );
+      await conn.query(
+        'DELETE FROM beneficiary_whtr_status WHERE session_id = ? AND program_id = ? AND beneficiary_code = ?',
+        [sessionId, programId, beneficiaryCode]
+      );
+      await conn.query(
+        'DELETE FROM beneficiary_muac_status WHERE session_id = ? AND program_id = ? AND beneficiary_code = ?',
+        [sessionId, programId, beneficiaryCode]
+      );
+      await conn.query(
+        'DELETE FROM beneficiary_edema_status WHERE session_id = ? AND program_id = ? AND beneficiary_code = ?',
+        [sessionId, programId, beneficiaryCode]
+      );
+      await conn.query(
+        'DELETE FROM nutritionist_record WHERE session_id = ? AND program_id = ? AND beneficiary_code = ?',
+        [sessionId, programId, beneficiaryCode]
+      );
+      continue;
+    }
+
+    const weightKg = toNumOrNull(raw.weight_kg);
+    const heightCm = toNumOrNull(raw.height_cm);
+    const waistCm = toNumOrNull(raw.waist_cm);
+    const muacCm = toNumOrNull(raw.muac_cm);
+    const edema = raw.edema === null || raw.edema === undefined ? null : Boolean(raw.edema);
+
+    const effectiveHeight = resolveEffectiveHeight({
+      sessionDate,
+      sessionHeightCm: heightCm,
+      priorHeights,
+      initialHeightCm,
+      registrationDate: ben.registration_date,
+    });
+
+    if (heightCm != null && heightCm > 0) {
+      priorHeights.push({ sessionDate, heightCm });
+    }
+
+    // 1. BMI status
+    const bmiRes = classifyBmiStatus({
+      sex: ben.sex,
+      birthMonth: Number(ben.birth_month),
+      birthYear: Number(ben.birth_year),
+      asOf: sessionDate,
+      weightKg,
+      heightCm: effectiveHeight.heightCm,
+    });
+    if (bmiRes) {
+      const bmiChange = computeBmiSignedChange({
+        currBmi: bmiRes.bmi,
+        prevBmi: prevBmi?.bmi ?? null,
+        birthMonth: Number(ben.birth_month),
+        birthYear: Number(ben.birth_year),
+        sex: ben.sex,
+        currDate: sessionDate,
+        prevDate: prevBmi?.sessionDate ?? sessionDate,
+      });
+      await conn.query(
+        `INSERT INTO beneficiary_bmi_status (session_id, program_id, beneficiary_code, status_key, bmi_change)
+         VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           status_key = VALUES(status_key),
+           bmi_change = VALUES(bmi_change)`,
+        [sessionId, programId, beneficiaryCode, bmiRes.statusKey, bmiChange]
+      );
+      prevBmi = { bmi: bmiRes.bmi, sessionDate };
+    } else {
+      await conn.query(
+        'DELETE FROM beneficiary_bmi_status WHERE session_id = ? AND program_id = ? AND beneficiary_code = ?',
+        [sessionId, programId, beneficiaryCode]
+      );
+    }
+
+    // 2. WHtR status
+    const whtrRes = classifyWhtrStatus({
+      waistCm,
+      heightCm: effectiveHeight.heightCm,
+    });
+    if (whtrRes) {
+      const whtrChange = computeWhtrSignedChange(whtrRes.whtr, prevWhtr);
+      await conn.query(
+        `INSERT INTO beneficiary_whtr_status (session_id, program_id, beneficiary_code, status_key, whtr_change)
+         VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           status_key = VALUES(status_key),
+           whtr_change = VALUES(whtr_change)`,
+        [sessionId, programId, beneficiaryCode, whtrRes.statusKey, whtrChange]
+      );
+      prevWhtr = whtrRes.whtr;
+    } else {
+      await conn.query(
+        'DELETE FROM beneficiary_whtr_status WHERE session_id = ? AND program_id = ? AND beneficiary_code = ?',
+        [sessionId, programId, beneficiaryCode]
+      );
+    }
+
+    // 3. MUAC status
+    const muacRes = classifyMuacStatus({
+      muacCm,
+      birthMonth: Number(ben.birth_month),
+      birthYear: Number(ben.birth_year),
+      asOf: sessionDate,
+    });
+    if (muacRes) {
+      const muacChange = computeMuacSignedChange(muacRes.muacCm, prevMuac);
+      await conn.query(
+        `INSERT INTO beneficiary_muac_status (session_id, program_id, beneficiary_code, status_key, muac_change)
+         VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           status_key = VALUES(status_key),
+           muac_change = VALUES(muac_change)`,
+        [sessionId, programId, beneficiaryCode, muacRes.statusKey, muacChange]
+      );
+      prevMuac = muacRes.muacCm;
+    } else {
+      await conn.query(
+        'DELETE FROM beneficiary_muac_status WHERE session_id = ? AND program_id = ? AND beneficiary_code = ?',
+        [sessionId, programId, beneficiaryCode]
+      );
+    }
+
+    // 4. Edema status
+    const edemaRes = classifyEdemaStatus(edema);
+    if (edemaRes) {
+      await conn.query(
+        `INSERT INTO beneficiary_edema_status (session_id, program_id, beneficiary_code, status_key)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           status_key = VALUES(status_key)`,
+        [sessionId, programId, beneficiaryCode, edemaRes.statusKey]
+      );
+    } else {
+      await conn.query(
+        'DELETE FROM beneficiary_edema_status WHERE session_id = ? AND program_id = ? AND beneficiary_code = ?',
+        [sessionId, programId, beneficiaryCode]
+      );
+    }
+  }
+}
 
 /**
  * "Switch Account" for the mockup (no auth): remembers the chosen organization
@@ -44,7 +267,9 @@ export type RegisterBeneficiaryInput = {
   sessionId: string;
   birthMonth: number;
   birthYear: number;
-  sex: 'female' | 'male';
+  sex: Sex;
+  initialWeightKg: number;
+  initialHeightCm: number;
   name?: string | null;
   allergies?: string[];
   guardian?: {
@@ -84,8 +309,31 @@ async function generateUniqueAlias(conn: PoolConnection, programId: string): Pro
 export async function registerBeneficiaryAction(
   input: RegisterBeneficiaryInput
 ): Promise<RegisterBeneficiaryResult> {
-  const { programId, sessionId, birthMonth, birthYear, sex, name, allergies, guardian } = input;
+  const {
+    programId,
+    sessionId,
+    birthMonth,
+    birthYear,
+    sex,
+    initialWeightKg,
+    initialHeightCm,
+    name,
+    allergies,
+    guardian,
+  } = input;
   const today = getMockToday();
+
+  if (
+    !Number.isFinite(initialWeightKg) ||
+    initialWeightKg <= 0 ||
+    !Number.isFinite(initialHeightCm) ||
+    initialHeightCm <= 0
+  ) {
+    return {
+      success: false,
+      error: 'Initial weight (kg) and initial height (cm) are required and must be positive.',
+    };
+  }
 
   // Validate session state and locking
   const [session] = await query<{ session_id: string; session_date: string; submitted_at: string | null }>(
@@ -110,7 +358,7 @@ export async function registerBeneficiaryAction(
 
   // Validate age & guardian requirement
   const months = ageInMonths(birthMonth, birthYear, today);
-  const isMinor = months < 216; // < 18 years
+  const isMinor = months < 216;
   const trimmedName = name?.trim() || null;
 
   if (isMinor && trimmedName) {
@@ -138,14 +386,35 @@ export async function registerBeneficiaryAction(
         alias = await generateUniqueAlias(conn, programId);
       }
 
-      // 2. Insert into beneficiary table
+      // 2. Prepare guardian info if provided
+      let pendingGuardian: { name: string; number: string; relationship: string } | null = null;
+      if (guardian && guardian.name?.trim() && guardian.number?.trim()) {
+        pendingGuardian = {
+          name: guardian.name.trim(),
+          number: guardian.number.trim(),
+          relationship: guardian.relationship.trim(),
+        };
+      }
+
+      // 3. Insert beneficiary initially with name = NULL so consent can be recorded before writing a real name (Invariant 9)
       await conn.query(
-        `INSERT INTO beneficiary (program_id, beneficiary_code, name, birth_month, birth_year, sex, registered_session_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [programId, beneficiaryCode, trimmedName, birthMonth, birthYear, sex, sessionId]
+        `INSERT INTO beneficiary (
+           program_id, beneficiary_code, name, birth_month, birth_year, sex,
+           initial_weight_kg, initial_height_cm, registered_session_id
+         ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+        [
+          programId,
+          beneficiaryCode,
+          birthMonth,
+          birthYear,
+          sex,
+          initialWeightKg,
+          initialHeightCm,
+          sessionId,
+        ]
       );
 
-      // 3. Insert into beneficiary_alias if unnamed
+      // 4. Insert alias if unnamed
       if (alias) {
         await conn.query(
           'INSERT INTO beneficiary_alias (program_id, beneficiary_code, alias) VALUES (?, ?, ?)',
@@ -153,20 +422,32 @@ export async function registerBeneficiaryAction(
         );
       }
 
-      // 4. Guardian and Consent if provided
-      if (guardian && guardian.name?.trim() && guardian.number?.trim()) {
+      // 5. Insert consent (and guardian if provided) before setting beneficiary.name
+      if (pendingGuardian) {
         const guardianId = crypto.randomUUID();
         await conn.query(
           'INSERT INTO guardian (guardian_id, name, `number`) VALUES (?, ?, ?)',
-          [guardianId, guardian.name.trim(), guardian.number.trim()]
+          [guardianId, pendingGuardian.name, pendingGuardian.number]
         );
         await conn.query(
           'INSERT INTO consent (program_id, beneficiary_code, guardian_id, relationship) VALUES (?, ?, ?, ?)',
-          [programId, beneficiaryCode, guardianId, guardian.relationship.trim()]
+          [programId, beneficiaryCode, guardianId, pendingGuardian.relationship]
+        );
+      } else if (trimmedName) {
+        await conn.query(
+          'INSERT INTO consent (program_id, beneficiary_code, guardian_id, relationship) VALUES (?, ?, NULL, NULL)',
+          [programId, beneficiaryCode]
         );
       }
 
-      // 5. Allergies if provided
+      if (trimmedName) {
+        await conn.query(
+          'UPDATE beneficiary SET name = ? WHERE program_id = ? AND beneficiary_code = ?',
+          [trimmedName, programId, beneficiaryCode]
+        );
+      }
+
+      // 6. Insert allergies if provided
       if (allergies && allergies.length > 0) {
         for (const allergyId of allergies) {
           await conn.query(
@@ -176,12 +457,15 @@ export async function registerBeneficiaryAction(
         }
       }
 
-      // 6. Insert initial session_record(is_present = TRUE)
+      // 7. Insert initial session_record (is_present = TRUE) with the same initial measurements
       await conn.query(
         `INSERT INTO session_record (session_id, program_id, beneficiary_code, is_present, weight_kg, height_cm, waist_cm)
-         VALUES (?, ?, ?, TRUE, NULL, NULL, NULL)`,
-        [sessionId, programId, beneficiaryCode]
+         VALUES (?, ?, ?, TRUE, ?, ?, NULL)`,
+        [sessionId, programId, beneficiaryCode, initialWeightKg, initialHeightCm]
       );
+
+      // 8. Sync per-metric status row (BMI) inside the same transaction
+      await syncBeneficiarySessionStatuses(conn, programId, beneficiaryCode);
 
       revalidatePath(`/programs/${programId}`);
       revalidatePath('/');
@@ -240,8 +524,42 @@ export async function saveDefaultInputAction(input: DefaultInputData): Promise<A
   );
   if (laterSubmitted.length > 0) return { success: false, error: 'Cannot edit a skipped / locked session.' };
 
+  const cleanWeight = isPresent && weightKg != null && weightKg > 0 ? weightKg : null;
+  const cleanHeight = isPresent && heightCm != null && heightCm > 0 ? heightCm : null;
+  const cleanWaist = isPresent && waistCm != null && waistCm > 0 ? waistCm : null;
+
   try {
     return await withTransaction(async (conn) => {
+      // Check if this draft session is the beneficiary's registration session (write-through invariant)
+      const [benRows]: [RowDataPacket[], unknown] = await conn.query(
+        'SELECT registered_session_id, initial_weight_kg, initial_height_cm FROM beneficiary WHERE program_id = ? AND beneficiary_code = ? FOR UPDATE',
+        [programId, beneficiaryCode]
+      );
+      if (benRows.length === 0) {
+        return { success: false, error: 'Beneficiary not found.' };
+      }
+      const ben = benRows[0] as {
+        registered_session_id: string;
+        initial_weight_kg: number | string;
+        initial_height_cm: number | string;
+      };
+      const isRegistrationSession = ben.registered_session_id === sessionId;
+
+      if (isRegistrationSession) {
+        if (!isPresent || cleanWeight == null || cleanHeight == null) {
+          return {
+            success: false,
+            error: 'Registration session records require attendance and positive weight and height values.',
+          };
+        }
+        await conn.query(
+          `UPDATE beneficiary
+              SET initial_weight_kg = ?, initial_height_cm = ?
+            WHERE program_id = ? AND beneficiary_code = ?`,
+          [cleanWeight, cleanHeight, programId, beneficiaryCode]
+        );
+      }
+
       // 1. Upsert session_record
       await conn.query(
         `INSERT INTO session_record (session_id, program_id, beneficiary_code, is_present, weight_kg, height_cm, waist_cm)
@@ -251,24 +569,16 @@ export async function saveDefaultInputAction(input: DefaultInputData): Promise<A
            weight_kg = VALUES(weight_kg),
            height_cm = VALUES(height_cm),
            waist_cm = VALUES(waist_cm)`,
-        [
-          sessionId,
-          programId,
-          beneficiaryCode,
-          isPresent,
-          weightKg != null && weightKg > 0 ? weightKg : null,
-          heightCm != null && heightCm > 0 ? heightCm : null,
-          waistCm != null && waistCm > 0 ? waistCm : null,
-        ]
+        [sessionId, programId, beneficiaryCode, isPresent, cleanWeight, cleanHeight, cleanWaist]
       );
 
-      // 2. Replace survey_answer rows
+      // 2. Replace survey_answer rows (clear if absent or empty)
       await conn.query(
         'DELETE FROM survey_answer WHERE session_id = ? AND program_id = ? AND beneficiary_code = ?',
         [sessionId, programId, beneficiaryCode]
       );
 
-      if (surveyAnswers && typeof surveyAnswers === 'object') {
+      if (isPresent && surveyAnswers && typeof surveyAnswers === 'object') {
         for (const [qId, val] of Object.entries(surveyAnswers)) {
           const numVal = Number(val);
           if (numVal >= 1 && numVal <= 5) {
@@ -279,6 +589,9 @@ export async function saveDefaultInputAction(input: DefaultInputData): Promise<A
           }
         }
       }
+
+      // 3. Upsert/delete per-metric statuses & recompute next rows' *_change
+      await syncBeneficiarySessionStatuses(conn, programId, beneficiaryCode);
 
       revalidatePath(`/programs/${programId}`);
       revalidatePath('/');
@@ -363,6 +676,9 @@ export async function saveNutritionistInputAction(input: NutritionistInputData):
         ]
       );
 
+      // Upsert/delete per-metric statuses (MUAC / Edema) & recompute next rows' *_change
+      await syncBeneficiarySessionStatuses(conn, programId, beneficiaryCode);
+
       revalidatePath(`/programs/${programId}`);
       revalidatePath('/');
       return { success: true, message: 'Nutritionist check saved successfully.' };
@@ -383,7 +699,6 @@ export type SubmitSessionResult = {
   success: boolean;
   message?: string;
   error?: string;
-  closedTimelineSeq?: number;
 };
 
 export async function submitSessionAction(
@@ -409,13 +724,16 @@ export async function submitSessionAction(
         return { success: false, error: 'Session is already submitted.' };
       }
 
-      // Check no later session is submitted
+      // Check chronological ordering (no later session already submitted)
       const [laterRows]: [RowDataPacket[], unknown] = await conn.query(
         'SELECT session_id FROM program_session WHERE program_id = ? AND session_date > ? AND submitted_at IS NOT NULL LIMIT 1',
         [programId, session.session_date]
       );
       if (laterRows.length > 0) {
-        return { success: false, error: 'Cannot submit: a later session has already been submitted. This session is skipped and locked.' };
+        return {
+          success: false,
+          error: 'Cannot submit: a later session has already been submitted. This session is skipped and locked.',
+        };
       }
 
       // 2. Stamp submitted_at
@@ -424,12 +742,14 @@ export async function submitSessionAction(
         [submitTimestamp, sessionId]
       );
 
-      // 3. Reconciliation pass: insert is_present=FALSE for registered beneficiaries who have no record
+      // 3. Reconciliation pass: insert is_present = FALSE for registered beneficiaries who have no record
       await conn.query(
         `INSERT INTO session_record (session_id, program_id, beneficiary_code, is_present, weight_kg, height_cm, waist_cm)
          SELECT ?, b.program_id, b.beneficiary_code, FALSE, NULL, NULL, NULL
            FROM beneficiary b
-           JOIN program_session ps_reg ON ps_reg.session_id = b.registered_session_id
+           JOIN program_session ps_reg
+             ON ps_reg.session_id = b.registered_session_id
+            AND ps_reg.program_id = b.program_id
           WHERE b.program_id = ?
             AND ps_reg.session_date <= ?
             AND b.beneficiary_code NOT IN (
@@ -441,265 +761,12 @@ export async function submitSessionAction(
         [sessionId, programId, session.session_date, sessionId, programId]
       );
 
-      // 4. Timeline Close check
-      const [closingTimelineRows]: [RowDataPacket[], unknown] = await conn.query(
-        `SELECT t.timeline_id, t.seq, t.start_session_id, t.end_session_id, t.closed_at,
-                s_start.session_date AS start_date,
-                s_end.session_date AS end_date
-           FROM timeline t
-           JOIN program_session s_start ON s_start.session_id = t.start_session_id
-           JOIN program_session s_end ON s_end.session_id = t.end_session_id
-          WHERE t.program_id = ?
-            AND t.end_session_id = ?
-            AND t.closed_at IS NULL
-          LIMIT 1`,
-        [programId, sessionId]
-      );
-
-      let closedSeq: number | undefined;
-
-      if (closingTimelineRows.length > 0) {
-        const tl = closingTimelineRows[0] as {
-          timeline_id: string;
-          seq: number;
-          start_date: string;
-          end_date: string;
-        };
-        closedSeq = tl.seq;
-
-        // Stamp closed_at
-        await conn.query('UPDATE timeline SET closed_at = ? WHERE timeline_id = ?', [
-          submitTimestamp,
-          tl.timeline_id,
-        ]);
-
-        // Fetch all submitted records for current timeline (including clinical nutritionist checks)
-        const [currRecords]: [RowDataPacket[], unknown] = await conn.query(
-          `SELECT sr.session_id, sr.beneficiary_code, sr.is_present, sr.weight_kg, sr.height_cm, sr.waist_cm,
-                  ps.session_date, nr.muac_cm, nr.edema
-             FROM session_record sr
-             JOIN program_session ps ON ps.session_id = sr.session_id
-             LEFT JOIN nutritionist_record nr
-               ON nr.session_id = sr.session_id
-              AND nr.program_id = sr.program_id
-              AND nr.beneficiary_code = sr.beneficiary_code
-            WHERE sr.program_id = ?
-              AND ps.submitted_at IS NOT NULL
-            ORDER BY ps.session_date ASC`,
-          [programId]
-        );
-
-        // Fetch beneficiary demographic info
-        const [benRows]: [RowDataPacket[], unknown] = await conn.query(
-          `SELECT b.beneficiary_code, b.birth_month, b.birth_year, b.sex,
-                  ps.session_date AS registered_session_date
-             FROM beneficiary b
-             JOIN program_session ps ON ps.session_id = b.registered_session_id
-            WHERE b.program_id = ?`,
-          [programId]
-        );
-
-        const benMap = new Map<string, { birth_month: number; birth_year: number; sex: 'female' | 'male'; regDate: string }>();
-        for (const b of benRows as Array<{ beneficiary_code: string; birth_month: number; birth_year: number; sex: 'female' | 'male'; registered_session_date: string }>) {
-          benMap.set(b.beneficiary_code, {
-            birth_month: b.birth_month,
-            birth_year: b.birth_year,
-            sex: b.sex,
-            regDate: b.registered_session_date.slice(0, 10),
-          });
-        }
-
-        type RawTimelineRec = {
-          beneficiary_code: string;
-          session_date: string;
-          is_present: number | boolean;
-          weight_kg: number | null;
-          height_cm: number | null;
-          waist_cm: number | null;
-          muac_cm: number | null;
-          edema: number | boolean | null;
-        };
-
-        // Filter current timeline records using attribution rule
-        const currByBen = new Map<string, SessionMeasurement[]>();
-        for (const r of currRecords as RawTimelineRec[]) {
-          const sDate = r.session_date.slice(0, 10);
-          if (isSessionOwnedByTimeline(sDate, tl.seq, tl.start_date, tl.end_date)) {
-            const list = currByBen.get(r.beneficiary_code) ?? [];
-            list.push({
-              session_date: sDate,
-              is_present: Boolean(r.is_present),
-              weight_kg: r.weight_kg != null ? Number(r.weight_kg) : null,
-              height_cm: r.height_cm != null ? Number(r.height_cm) : null,
-              waist_cm: r.waist_cm != null ? Number(r.waist_cm) : null,
-              muac_cm: r.muac_cm != null ? Number(r.muac_cm) : null,
-              edema: r.edema != null ? Boolean(r.edema) : null,
-            });
-            currByBen.set(r.beneficiary_code, list);
-          }
-        }
-
-        // If seq > 1, get previous timeline dates and measurements
-        const prevByBen = new Map<string, SessionMeasurement[]>();
-        let prevTimelineEndDate = tl.end_date.slice(0, 10);
-        if (tl.seq > 1) {
-          const [prevTlRows]: [RowDataPacket[], unknown] = await conn.query(
-            `SELECT t_prev.seq, s_start.session_date AS start_date, s_end.session_date AS end_date
-               FROM timeline t_prev
-               JOIN program_session s_start ON s_start.session_id = t_prev.start_session_id
-               JOIN program_session s_end ON s_end.session_id = t_prev.end_session_id
-              WHERE t_prev.program_id = ? AND t_prev.seq = ?
-              LIMIT 1`,
-            [programId, tl.seq - 1]
-          );
-
-          if (prevTlRows.length > 0) {
-            const ptl = prevTlRows[0] as { seq: number; start_date: string; end_date: string };
-            prevTimelineEndDate = ptl.end_date.slice(0, 10);
-            for (const r of currRecords as RawTimelineRec[]) {
-              const sDate = r.session_date.slice(0, 10);
-              if (isSessionOwnedByTimeline(sDate, ptl.seq, ptl.start_date, ptl.end_date)) {
-                const list = prevByBen.get(r.beneficiary_code) ?? [];
-                list.push({
-                  session_date: sDate,
-                  is_present: Boolean(r.is_present),
-                  weight_kg: r.weight_kg != null ? Number(r.weight_kg) : null,
-                  height_cm: r.height_cm != null ? Number(r.height_cm) : null,
-                  waist_cm: r.waist_cm != null ? Number(r.waist_cm) : null,
-                  muac_cm: r.muac_cm != null ? Number(r.muac_cm) : null,
-                  edema: r.edema != null ? Boolean(r.edema) : null,
-                });
-                prevByBen.set(r.beneficiary_code, list);
-              }
-            }
-          }
-        }
-
-        // Calculate statuses and insert into beneficiary_timeline_status
-        let baselineCount = 0;
-        let monitorCount = 0;
-        let monitorCloselyCount = 0;
-        let unavailableCount = 0;
-        let totalMeasured = 0;
-        let sumBmi = 0;
-        let countBmi = 0;
-        let improvedCount = 0;
-
-        for (const [code, ben] of benMap.entries()) {
-          if (ben.regDate > tl.end_date.slice(0, 10)) continue;
-
-          const currList = currByBen.get(code) ?? [];
-          const currMetrics = summarizeTimeline(currList);
-
-          const hasAnyMeasurement =
-            currMetrics.weightKg != null ||
-            currMetrics.heightCm != null ||
-            currMetrics.waistCm != null ||
-            currMetrics.muacCm != null ||
-            currMetrics.edema === true;
-
-          if (!hasAnyMeasurement) {
-            continue;
-          }
-
-          const statusResult = classifyStatus({
-            sex: ben.sex,
-            birthMonth: ben.birth_month,
-            birthYear: ben.birth_year,
-            asOf: tl.end_date,
-            bmi: currMetrics.bmi,
-            whtr: currMetrics.whtr,
-            muacCm: currMetrics.muacCm,
-            edema: currMetrics.edema,
-            hasPartialMeasurement: hasAnyMeasurement,
-          });
-
-          if (!statusResult) continue;
-
-          totalMeasured++;
-          if (currMetrics.bmi != null) {
-            sumBmi += currMetrics.bmi;
-            countBmi++;
-          }
-
-          if (statusResult.statusKey === 'baseline') baselineCount++;
-          else if (statusResult.statusKey === 'monitor') monitorCount++;
-          else if (statusResult.statusKey === 'monitor_closely') monitorCloselyCount++;
-          else if (statusResult.statusKey === 'unavailable') unavailableCount++;
-
-          let changes = { bmi_change: null as number | null, whtr_change: null as number | null, muac_change: null as number | null };
-          if (tl.seq > 1) {
-            const prevList = prevByBen.get(code) ?? [];
-            const prevMetrics = summarizeTimeline(prevList);
-            changes = computeTimelineChanges(currMetrics, prevMetrics, {
-              sex: ben.sex,
-              birthMonth: ben.birth_month,
-              birthYear: ben.birth_year,
-              currEndDate: tl.end_date.slice(0, 10),
-              prevEndDate: prevTimelineEndDate,
-            });
-            if (changes.bmi_change != null && changes.bmi_change > 0) {
-              improvedCount++;
-            }
-          }
-
-          await conn.query(
-            `INSERT INTO beneficiary_timeline_status (
-               program_id, beneficiary_code, timeline_id,
-               status_key, status_reason,
-               bmi_change, whtr_change, muac_change
-             )
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-             ON DUPLICATE KEY UPDATE
-               status_key = VALUES(status_key),
-               status_reason = VALUES(status_reason),
-               bmi_change = VALUES(bmi_change),
-               whtr_change = VALUES(whtr_change),
-               muac_change = VALUES(muac_change)`,
-            [
-              programId,
-              code,
-              tl.timeline_id,
-              statusResult.statusKey,
-              statusResult.reasonKey,
-              changes.bmi_change,
-              changes.whtr_change,
-              changes.muac_change,
-            ]
-          );
-        }
-
-        // Templated AI trend interpretation
-        const registeredCount = Array.from(benMap.values()).filter((b) => b.regDate <= tl.end_date).length;
-        const pct = registeredCount > 0 ? Math.round((totalMeasured / registeredCount) * 100) : 0;
-        const meanBmi = countBmi > 0 ? (sumBmi / countBmi).toFixed(1) : '—';
-        const ordinal = tl.seq === 1 ? 'First Timeline' : `Timeline ${tl.seq}`;
-
-        let comments = `${ordinal} (${formatDate(tl.start_date)} to ${formatDate(tl.end_date)}): ${totalMeasured} of ${registeredCount} beneficiaries were measured (${pct}%). Mean BMI is ${meanBmi}. ${baselineCount} are at baseline, ${monitorCount} need monitoring and ${monitorCloselyCount} need closer monitoring.`;
-        if (tl.seq === 1) {
-          comments += ' With no earlier Timeline, there is no trend yet.';
-        } else {
-          comments += ` ${improvedCount} beneficiaries moved closer to a healthy range compared to Timeline ${tl.seq - 1}.`;
-        }
-
-        const aiId = crypto.randomUUID();
-        const aiTime = `${today} 14:02:00`;
-        await conn.query(
-          `INSERT INTO ai_interpretation (interpretation_id, scope, session_id, timeline_id, category, comments, created_at)
-           VALUES (?, 'timeline', NULL, ?, 'nutrition_trend', ?, ?)`,
-          [aiId, tl.timeline_id, comments, aiTime]
-        );
-      }
-
       revalidatePath(`/programs/${programId}`);
       revalidatePath('/');
 
       return {
         success: true,
-        message: closedSeq
-          ? `Session submitted, reconciliation complete, and Timeline ${closedSeq} closed.`
-          : 'Session submitted and reconciliation complete.',
-        closedTimelineSeq: closedSeq,
+        message: 'Session submitted and attendance reconciliation complete.',
       };
     });
   } catch (err) {
