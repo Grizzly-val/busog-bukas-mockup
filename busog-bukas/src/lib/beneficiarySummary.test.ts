@@ -139,7 +139,7 @@ describe('summarizeFilteredBeneficiaries', () => {
     }
   });
 
-  it('filters strictly by attended_count > x (blank = no filter) before summarizing', () => {
+  it('filters by attended_count >= x (blank = no filter) before summarizing', () => {
     const sampleCohort: FilterableBeneficiaryRow[] = [
       {
         latest_status: 'baseline',
@@ -180,14 +180,24 @@ describe('summarizeFilteredBeneficiaries', () => {
     const allMatching = filterBeneficiariesByCriteria(sampleCohort, { minAttendedSessions: '   ' });
     assert.equal(allMatching.length, 3);
 
-    // Strictly greater than 3 (attended_count > 3) -> only attended_count === 5 matches (attended_count === 3 is excluded)
-    const gt3 = filterBeneficiariesByCriteria(sampleCohort, { minAttendedSessions: '3' });
-    assert.equal(gt3.length, 1);
-    assert.equal(gt3[0].attended_count, 5);
+    // Greater than or equal to 3 (attended_count >= 3) -> attended_count 3 and 5 match
+    const gte3 = filterBeneficiariesByCriteria(sampleCohort, { minAttendedSessions: '3' });
+    assert.equal(gte3.length, 2);
+    assert.deepEqual(
+      gte3.map((r) => r.attended_count),
+      [3, 5]
+    );
 
-    const summaryGt3 = summarizeFilteredBeneficiaries(gt3);
-    assert.equal(summaryGt3.totalMatching, 1);
-    assert.equal(summaryGt3.weight.decreased.n, 1);
-    assert.equal(summaryGt3.weight.decreased.mean, -0.6);
+    const summaryGte3 = summarizeFilteredBeneficiaries(gte3);
+    assert.equal(summaryGte3.totalMatching, 2);
+    assert.equal(summaryGte3.weight.increased.n, 1);
+    assert.equal(summaryGte3.weight.increased.mean, 1.0);
+    assert.equal(summaryGte3.weight.decreased.n, 1);
+    assert.equal(summaryGte3.weight.decreased.mean, -0.6);
+
+    // Greater than or equal to 5 -> only attended_count === 5 matches
+    const gte5 = filterBeneficiariesByCriteria(sampleCohort, { minAttendedSessions: '5' });
+    assert.equal(gte5.length, 1);
+    assert.equal(gte5[0].attended_count, 5);
   });
 });

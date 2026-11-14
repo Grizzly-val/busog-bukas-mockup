@@ -368,9 +368,9 @@ a.bb-stat:hover {
 
 .bb-stepper-line {
   position: absolute;
-  top: 50%;
-  left: 30px;
-  right: 30px;
+  top: 54px;
+  left: 38px;
+  right: 38px;
   height: 3px;
   background-color: #e5e7eb;
   transform: translateY(-50%);
@@ -386,13 +386,19 @@ a.bb-stat:hover {
   cursor: pointer;
   background: transparent;
   border: none;
-  padding: 0;
+  border-radius: 0.85rem;
+  padding: 0.5rem 0.65rem;
   outline: none;
-  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.18s ease, box-shadow 0.18s ease;
 }
 
 .bb-node-wrapper:hover {
   transform: translateY(-2px);
+}
+
+.bb-node-wrapper.is-selected {
+  background-color: rgba(236, 253, 245, 0.85);
+  box-shadow: inset 0 0 0 1px rgba(16, 185, 129, 0.24);
 }
 
 .bb-node-circle {
@@ -460,8 +466,8 @@ a.bb-stat:hover {
 
 /* Selected Node Indicator (Prominent Focus Ring) */
 .bb-node-wrapper.is-selected .bb-node-circle {
-  box-shadow: 0 0 0 5px rgba(200, 241, 105, 0.8), 0 4px 14px rgba(0, 0, 0, 0.15);
-  transform: scale(1.1);
+  box-shadow: 0 0 0 2.5px #ffffff, 0 0 0 4.5px #047857, 0 6px 14px rgba(11, 61, 36, 0.16);
+  transform: scale(1.06);
 }
 
 .bb-node-meta {
@@ -478,7 +484,7 @@ a.bb-stat:hover {
 }
 
 .bb-node-wrapper.is-selected .bb-node-title {
-  color: #0b3d24;
+  color: #064e3b;
   font-weight: 700;
 }
 
@@ -559,6 +565,663 @@ a.bb-stat:hover {
   border-top: 1px solid rgba(0, 0, 0, 0.06);
 }
 
+/* ------------------------------------------------------------------------- */
+/* Program Nutritional Status — Editorial Hierarchy & Minimalist Tables      */
+/* ------------------------------------------------------------------------- */
+.bb-ns-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+
+.bb-ns-table thead th {
+  padding: 0.6rem 0.75rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.045em;
+  color: #6b7280;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  white-space: nowrap;
+  background: transparent;
+}
+
+.bb-ns-table tbody td {
+  padding: 0.85rem 0.75rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  vertical-align: middle;
+}
+
+.bb-ns-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.bb-status-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1.25;
+  padding: 0.16rem 0.48rem;
+  border-radius: 6px;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.bb-status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
+.bb-action-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.42rem 0.78rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #1f2933;
+  background: #f9faf9;
+  border: 1px solid rgba(0, 0, 0, 0.09);
+  border-radius: 8px;
+  transition: background-color 0.16s ease, border-color 0.16s ease, transform 0.15s ease;
+}
+
+.bb-action-chip:hover {
+  background: #f1f4f2;
+  border-color: rgba(11, 61, 36, 0.24);
+}
+
+.bb-action-chip:active {
+  transform: scale(0.985);
+}
+
+.bb-action-chip-primary {
+  background: #0b3d24;
+  color: #ffffff;
+  border-color: #0b3d24;
+}
+
+.bb-action-chip-primary:hover {
+  background: #145333;
+  border-color: #145333;
+  color: #ffffff;
+}
+
+.bb-tab-bar {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  margin-bottom: 1.25rem;
+}
+
+.bb-tab-btn {
+  position: relative;
+  background: transparent;
+  border: none;
+  padding: 0.65rem 0.1rem;
+  font-size: 0.86rem;
+  font-weight: 500;
+  color: #6b7280;
+  transition: color 0.16s ease;
+}
+
+.bb-tab-btn:hover {
+  color: #1a1e1b;
+}
+
+.bb-tab-btn.is-active {
+  color: #0b3d24;
+  font-weight: 600;
+}
+
+.bb-tab-btn.is-active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: #0b3d24;
+  border-radius: 2px 2px 0 0;
+}
+
+.bb-history-row {
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.bb-history-row:hover td {
+  background-color: #f9faf9;
+}
+
+.bb-history-row.is-expanded td {
+  background-color: #f6f8f6;
+  border-bottom-color: transparent;
+}
+
+.bb-history-drawer {
+  background: #fbfbfa;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.bb-history-card {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+}
+
+.bb-history-entry + .bb-history-entry {
+  border-top: 1px solid rgba(0, 0, 0, 0.055);
+}
+
+/* Status Transitions: Session Train-Car Selector & Reactive Attendance */
+.bb-train-bar {
+  background: #f9faf9;
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  border-radius: 12px;
+  padding: 0.9rem 1.1rem;
+}
+
+.bb-train-track {
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  padding: 2px 2px 4px;
+  scrollbar-width: thin;
+}
+
+.bb-train-car {
+  flex: 0 0 auto;
+  min-width: 106px;
+  text-align: left;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.11);
+  border-radius: 9px;
+  padding: 0.42rem 0.78rem;
+  color: #1a1e1b;
+  transition: background-color 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease, color 0.16s ease;
+}
+
+.bb-train-car:hover:not(.is-selected) {
+  border-color: rgba(11, 61, 36, 0.4);
+  background: #f3f7f4;
+}
+
+.bb-train-car.is-selected {
+  background: #0b3d24;
+  border-color: #0b3d24;
+  color: #ffffff;
+  box-shadow: 0 3px 10px rgba(11, 61, 36, 0.16);
+}
+
+.bb-train-car-date {
+  font-size: 0.72rem;
+  color: #6b7280;
+}
+
+.bb-train-car.is-selected .bb-train-car-date {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.bb-train-connector {
+  position: relative;
+  width: 24px;
+  height: 2px;
+  background: rgba(11, 61, 36, 0.24);
+  flex-shrink: 0;
+}
+
+.bb-train-connector::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-top: 1.5px solid rgba(11, 61, 36, 0.42);
+  border-right: 1.5px solid rgba(11, 61, 36, 0.42);
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.bb-attendance-select {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #1a1e1b;
+  background-color: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  padding: 0.45rem 2rem 0.45rem 0.75rem;
+  cursor: pointer;
+}
+
+.bb-attendance-select:focus {
+  outline: none;
+  border-color: #0b3d24;
+  box-shadow: 0 0 0 2px rgba(11, 61, 36, 0.12);
+}
+
+.bb-sankey-wrap {
+  max-width: 560px;
+  width: 100%;
+  padding: 0.2rem 0;
+}
+
+.bb-sankey-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  overflow: visible;
+}
+
+.bb-sankey-empty {
+  font-size: 0.8rem;
+  color: #6b7280;
+  padding: 0.5rem 0;
+}
+
+.bb-sankey-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.85rem;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  color: #4b5563;
+}
+
+/* Weeks of the Program — Editorial Panels & Adaptive Meters */
+.bb-week-panel {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  border-radius: 12px;
+  padding: 1.15rem 1.25rem;
+}
+
+.bb-consistency-bar {
+  display: flex;
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #f1f3f2;
+  gap: 2px;
+}
+
+.bb-meter-track {
+  width: 100%;
+  height: 5px;
+  background: #eef1ef;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.bb-meter-fill {
+  height: 100%;
+  background: #1f9d55;
+  border-radius: 999px;
+  transition: width 0.25s ease;
+}
+
+.bb-week-trend-row {
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.bb-week-trend-row:hover td {
+  background-color: #f9faf9;
+}
+
+/* Open 3-column hairline grid in Week Breakdown */
+.bb-week-col {
+  padding-top: 1.25rem;
+  padding-bottom: 0.5rem;
+}
+
+.bb-week-col:first-child {
+  padding-top: 0.25rem;
+}
+
+.bb-week-col + .bb-week-col {
+  border-top: 1px solid rgba(0, 0, 0, 0.07);
+  margin-top: 0.5rem;
+}
+
+@media (min-width: 1200px) {
+  .bb-week-col {
+    padding-top: 0.25rem;
+    padding-bottom: 0.25rem;
+    padding-right: 1.35rem;
+  }
+
+  .bb-week-col + .bb-week-col {
+    border-top: none;
+    margin-top: 0;
+    border-left: 1px solid rgba(0, 0, 0, 0.07);
+    padding-left: 1.5rem;
+  }
+
+  .bb-week-col:last-child {
+    padding-right: 0;
+  }
+}
+
+/* Survey Category Bar with Prior-Week Average Tick Marker */
+.bb-survey-meter-wrap {
+  position: relative;
+  width: 100%;
+  height: 11px;
+  display: flex;
+  align-items: center;
+}
+
+.bb-survey-prev-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #1a1e1b;
+  border-radius: 1px;
+  transform: translateX(-50%);
+  z-index: 2;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9);
+}
+
+/* All-Weeks Trend Multi-Series Line Chart & Summary Strip */
+.bb-trend-summary-strip {
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  border-radius: 12px;
+  background: #fbfbfa;
+  padding: 0.9rem 1.15rem;
+}
+
+.bb-trend-summary-cell + .bb-trend-summary-cell {
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  padding-top: 0.65rem;
+}
+
+@media (min-width: 768px) {
+  .bb-trend-summary-cell + .bb-trend-summary-cell {
+    border-top: none;
+    padding-top: 0;
+    border-left: 1px solid rgba(0, 0, 0, 0.06);
+    padding-left: 1.15rem;
+  }
+}
+
+.bb-trend-chart-wrap {
+  width: 100%;
+  overflow-x: auto;
+  padding: 0.25rem 0 0.5rem;
+}
+
+.bb-trend-hit-col {
+  cursor: pointer;
+}
+
+.bb-trend-hit-guide {
+  opacity: 0;
+  transition: opacity 0.14s ease;
+}
+
+.bb-trend-hit-col:hover .bb-trend-hit-guide,
+.bb-trend-hit-col:focus-visible .bb-trend-hit-guide {
+  opacity: 1;
+}
+
+/* Filtered Cohort Summary Modal — Stacked Outcomes & Directional Comparisons */
+.bb-cohort-metric-block {
+  padding: 1.05rem 1.15rem;
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.bb-cohort-stack-bar {
+  display: flex;
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #eef1ef;
+  gap: 1.5px;
+}
+
+.bb-cohort-dir-card {
+  border-radius: 10px;
+  padding: 0.78rem 0.9rem;
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  background: #fbfbfa;
+  height: 100%;
+}
+
+.bb-cohort-dir-card.is-increased {
+  background: #f5faf6;
+  border-color: rgba(21, 128, 61, 0.16);
+}
+
+.bb-cohort-dir-card.is-decreased {
+  background: #fdf6f6;
+  border-color: rgba(185, 28, 28, 0.15);
+}
+
+.bb-cohort-meta-strip {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem 1.25rem;
+  padding-top: 0.65rem;
+  margin-top: 0.7rem;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  font-size: 0.78rem;
+}
+
+/* Per-Beneficiary History — Serpentine Week Rail Drawer */
+.bb-serpentine-metric-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  padding: 1rem 0;
+}
+
+.bb-serpentine-metric-row:first-child {
+  padding-top: 0.35rem;
+}
+
+.bb-serpentine-metric-row:last-child {
+  padding-bottom: 0.25rem;
+}
+
+.bb-serpentine-metric-row + .bb-serpentine-metric-row {
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+@media (min-width: 768px) {
+  .bb-serpentine-metric-row {
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 1.5rem;
+  }
+}
+
+.bb-serpentine-summary {
+  width: 100%;
+}
+
+@media (min-width: 768px) {
+  .bb-serpentine-summary {
+    flex: 0 0 205px;
+    width: 205px;
+    padding-top: 0.2rem;
+  }
+}
+
+.bb-serpentine-rail-col {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.bb-serpentine-grid-wrap {
+  padding: 0 22px;
+}
+
+.bb-serpentine-row-block {
+  position: relative;
+}
+
+.bb-serpentine-row-block + .bb-serpentine-row-block {
+  margin-top: 1.15rem;
+}
+
+.bb-serpentine-grid-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  position: relative;
+  z-index: 2;
+}
+
+.bb-serpentine-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 0 3px;
+  min-width: 0;
+}
+
+.bb-serpentine-node {
+  position: relative;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 2px solid #9ca3af;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #1a1e1b;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  flex-shrink: 0;
+}
+
+.bb-serpentine-node.is-baseline {
+  border-color: #15803d;
+  color: #14532d;
+  background: #f6fbf7;
+}
+
+.bb-serpentine-node.is-monitor {
+  border-color: #d97706;
+  color: #92400e;
+  background: #fffcf5;
+}
+
+.bb-serpentine-node.is-monitor_closely {
+  border-color: #dc2626;
+  color: #991b1b;
+  background: #fef6f6;
+}
+
+.bb-serpentine-delta {
+  font-size: 0.71rem;
+  font-weight: 600;
+  line-height: 1.25;
+  margin-top: 0.35rem;
+}
+
+.bb-serpentine-date {
+  font-size: 0.67rem;
+  line-height: 1.2;
+  color: #6b7280;
+  margin-top: 0.1rem;
+}
+
+.bb-serpentine-seg {
+  position: absolute;
+  top: 16px;
+  height: 2px;
+  transform: translateY(-50%);
+  background-color: #d1d5db;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 20px;
+  pointer-events: none;
+}
+
+.bb-serpentine-bead-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  pointer-events: auto;
+}
+
+.bb-serpentine-bead-group.is-vertical {
+  flex-direction: column;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.bb-serpentine-uturn-right {
+  position: absolute;
+  left: 90%;
+  right: -18px;
+  top: 15px;
+  bottom: calc(-17px - 1.15rem);
+  border-top: 2px solid #d1d5db;
+  border-right: 2px solid #d1d5db;
+  border-bottom: 2px solid #d1d5db;
+  border-top-right-radius: 18px;
+  border-bottom-right-radius: 18px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.bb-serpentine-uturn-right .bb-serpentine-bead-group.is-vertical {
+  right: -5px;
+}
+
+.bb-serpentine-uturn-left {
+  position: absolute;
+  left: -18px;
+  right: 90%;
+  top: 15px;
+  bottom: calc(-17px - 1.15rem);
+  border-top: 2px solid #d1d5db;
+  border-left: 2px solid #d1d5db;
+  border-bottom: 2px solid #d1d5db;
+  border-top-left-radius: 18px;
+  border-bottom-left-radius: 18px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.bb-serpentine-uturn-left .bb-serpentine-bead-group.is-vertical {
+  left: -5px;
+}
+
+.bb-serpentine-bead {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #64748b;
+  border: 1.5px solid #ffffff;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .bb-card,
   .bb-program-card,
@@ -566,6 +1229,13 @@ a.bb-stat:hover {
   .bb-node-circle,
   .bb-analytics-trigger,
   .bb-trigger-arrow,
+  .bb-action-chip,
+  .bb-tab-btn,
+  .bb-history-row,
+  .bb-train-car,
+  .bb-meter-fill,
+  .bb-week-trend-row,
+  .bb-trend-hit-guide,
   .bb-modal-overlay,
   .bb-modal-dialog {
     transition: none !important;

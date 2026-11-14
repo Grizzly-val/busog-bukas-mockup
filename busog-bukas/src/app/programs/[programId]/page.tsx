@@ -138,7 +138,7 @@ async function ProgramContent({
           />
           <Stat
             label="Program Weeks"
-            value={`${program.week_total} Weeks`}
+            value={`${weeks.length} Week${weeks.length === 1 ? '' : 's'}`}
             subtitle={`${completedWeeksCount} completed, ${activeWeeksCount} active`}
           />
         </div>
@@ -183,6 +183,7 @@ async function ProgramContent({
       <section className="mb-5">
         <BeneficiariesTable
           beneficiaries={beneficiaries}
+          hasNutritionist={program.nutritionist_count > 0}
           today={today}
           sessions={sessions}
           weeks={weeks}

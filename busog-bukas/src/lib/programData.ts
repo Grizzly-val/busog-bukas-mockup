@@ -10,6 +10,7 @@ import {
   ALL_METRICS,
   ageInMonths,
   approxBmiForAgeZ,
+  classifyCohortTransitionTag,
   computeBmi,
   computeWhtr,
   getMetricDaysOld,
@@ -17,7 +18,9 @@ import {
   isMetricOutdated,
   NEEDS_MEASUREMENT_MIN_SESSIONS_AGO,
   resolveEffectiveHeight,
+  round,
   shouldShowHeightNotice,
+  type CohortTransitionTag,
   type MetricKey,
   type MetricStatusHistoryPoint,
   type Sex,
@@ -173,6 +176,7 @@ export type ProgramWeekData = {
     reach_attended: number;
     reach_eligible: number;
     reach_pct: number;
+    new_registrations_count: number;
     consistency: {
       all_days: number;
       two_to_three_days: number;
@@ -244,9 +248,52 @@ export type NutritionalStatusModalRow = {
 
 export type OutdatedModalRow = NutritionalStatusModalRow;
 
+export type SubmittedSessionInfo = {
+  session_id: string;
+  session_number: number;
+  session_date: string;
+};
+
+export type BeneficiaryCohortRow = {
+  beneficiary_code: string;
+  display_name: string;
+  metric: MetricKey;
+  first_session_id: string;
+  first_session_number: number;
+  first_session_date: string;
+  first_status: StatusKey;
+  first_value: number | null;
+  first_value_display: string;
+  latest_session_id: string;
+  latest_session_number: number;
+  latest_session_date: string;
+  latest_status: StatusKey;
+  latest_value: number | null;
+  latest_value_display: string;
+  measurement_count: number;
+  sessions_attended: number;
+  net_change: number | null;
+  transition_tag: CohortTransitionTag;
+};
+
+export type MetricCohortSummary = {
+  metric: MetricKey;
+  label: string;
+  total_measured: number;
+  no_status_count: number;
+  single_measurement_count: number;
+  improved_count: number;
+  unchanged_count: number;
+  declined_count: number;
+  rows: BeneficiaryCohortRow[];
+};
+
 export type NutritionalStatusProgramData = {
   has_nutritionist: boolean;
+  available_metrics: MetricKey[];
   enrolled_count: number;
+  submitted_sessions: SubmittedSessionInfo[];
+  cohort_tracking: Partial<Record<MetricKey, MetricCohortSummary>>;
   metrics: Record<MetricKey, NutritionalMetricSummaryRow>;
   monitor_rows: Record<MetricKey, NutritionalStatusModalRow[]>;
   monitor_closely_rows: Record<MetricKey, NutritionalStatusModalRow[]>;
@@ -373,6 +420,9 @@ export async function getProgramPageData(programId: string): Promise<ProgramPage
     nutritionist_count: Number(programRaw.nutritionist_count),
   };
   const hasNutritionist = program.nutritionist_count > 0;
+  const availableMetrics: MetricKey[] = hasNutritionist
+    ? ['bmi', 'whtr', 'muac', 'edema']
+    : ['bmi', 'whtr'];
 
   // 2. Program weeks
   type RawWeek = {
@@ -567,7 +617,7 @@ export async function getProgramPageData(programId: string): Promise<ProgramPage
     [programId]
   );
 
-  // 10. Program-wide latest statuses via `v_latest_*` views (submitted sessions only)
+  // 10. Program-wide latest statuses via `v_latest_*` views (submitted sessions only, auto-scoped to availableMetrics)
   type RawViewMetricRow = {
     beneficiary_code: string;
     metric: MetricKey;
@@ -576,16 +626,18 @@ export async function getProgramPageData(programId: string): Promise<ProgramPage
     status_key: StatusKey;
     change_value: number | string | null;
   };
+  const metricPlaceholders = availableMetrics.map(() => '?').join(', ');
   const rawLatestViewRows = await query<RawViewMetricRow>(
     `SELECT beneficiary_code, metric, session_id,
             DATE_FORMAT(session_date, '%Y-%m-%d') AS session_date,
             status_key, change_value
        FROM v_latest_metric_status
-      WHERE program_id = ?`,
-    [programId]
+      WHERE program_id = ?
+        AND metric IN (${metricPlaceholders})`,
+    [programId, ...availableMetrics]
   );
 
-  // 11. Per-metric status history rows (all rows for session modal snapshot + submitted-only for history & transitions)
+  // 11. Per-metric status history rows (all rows for session modal snapshot + submitted-only for cohort tracking & history)
   type RawStatusTableRow = {
     metric: MetricKey;
     session_id: string;
@@ -595,32 +647,48 @@ export async function getProgramPageData(programId: string): Promise<ProgramPage
     status_key: StatusKey;
     change_value: number | string | null;
   };
+  const statusQueryParts: Array<{ sql: string; params: string[] }> = [
+    {
+      sql: `SELECT 'bmi' AS metric, s.session_id, DATE_FORMAT(ps.session_date, '%Y-%m-%d') AS session_date,
+                   ps.submitted_at, s.beneficiary_code, s.status_key, s.bmi_change AS change_value
+              FROM beneficiary_bmi_status s
+              JOIN program_session ps ON ps.session_id = s.session_id AND ps.program_id = s.program_id
+             WHERE s.program_id = ?`,
+      params: [programId],
+    },
+    {
+      sql: `SELECT 'whtr' AS metric, s.session_id, DATE_FORMAT(ps.session_date, '%Y-%m-%d') AS session_date,
+                   ps.submitted_at, s.beneficiary_code, s.status_key, s.whtr_change AS change_value
+              FROM beneficiary_whtr_status s
+              JOIN program_session ps ON ps.session_id = s.session_id AND ps.program_id = s.program_id
+             WHERE s.program_id = ?`,
+      params: [programId],
+    },
+  ];
+  if (hasNutritionist) {
+    statusQueryParts.push(
+      {
+        sql: `SELECT 'muac' AS metric, s.session_id, DATE_FORMAT(ps.session_date, '%Y-%m-%d') AS session_date,
+                     ps.submitted_at, s.beneficiary_code, s.status_key, s.muac_change AS change_value
+                FROM beneficiary_muac_status s
+                JOIN program_session ps ON ps.session_id = s.session_id AND ps.program_id = s.program_id
+               WHERE s.program_id = ?`,
+        params: [programId],
+      },
+      {
+        sql: `SELECT 'edema' AS metric, s.session_id, DATE_FORMAT(ps.session_date, '%Y-%m-%d') AS session_date,
+                     ps.submitted_at, s.beneficiary_code, s.status_key, NULL AS change_value
+                FROM beneficiary_edema_status s
+                JOIN program_session ps ON ps.session_id = s.session_id AND ps.program_id = s.program_id
+               WHERE s.program_id = ?`,
+        params: [programId],
+      }
+    );
+  }
   const rawAllStatusRows = await query<RawStatusTableRow>(
-    `SELECT 'bmi' AS metric, s.session_id, DATE_FORMAT(ps.session_date, '%Y-%m-%d') AS session_date,
-            ps.submitted_at, s.beneficiary_code, s.status_key, s.bmi_change AS change_value
-       FROM beneficiary_bmi_status s
-       JOIN program_session ps ON ps.session_id = s.session_id AND ps.program_id = s.program_id
-      WHERE s.program_id = ?
-     UNION ALL
-     SELECT 'whtr' AS metric, s.session_id, DATE_FORMAT(ps.session_date, '%Y-%m-%d') AS session_date,
-            ps.submitted_at, s.beneficiary_code, s.status_key, s.whtr_change AS change_value
-       FROM beneficiary_whtr_status s
-       JOIN program_session ps ON ps.session_id = s.session_id AND ps.program_id = s.program_id
-      WHERE s.program_id = ?
-     UNION ALL
-     SELECT 'muac' AS metric, s.session_id, DATE_FORMAT(ps.session_date, '%Y-%m-%d') AS session_date,
-            ps.submitted_at, s.beneficiary_code, s.status_key, s.muac_change AS change_value
-       FROM beneficiary_muac_status s
-       JOIN program_session ps ON ps.session_id = s.session_id AND ps.program_id = s.program_id
-      WHERE s.program_id = ?
-     UNION ALL
-     SELECT 'edema' AS metric, s.session_id, DATE_FORMAT(ps.session_date, '%Y-%m-%d') AS session_date,
-            ps.submitted_at, s.beneficiary_code, s.status_key, NULL AS change_value
-       FROM beneficiary_edema_status s
-       JOIN program_session ps ON ps.session_id = s.session_id AND ps.program_id = s.program_id
-      WHERE s.program_id = ?
+    `${statusQueryParts.map((q) => q.sql).join('\n     UNION ALL\n     ')}
      ORDER BY session_date ASC, session_id ASC`,
-    [programId, programId, programId, programId]
+    statusQueryParts.flatMap((q) => q.params)
   );
 
   // Lookup map: session_id__beneficiary_code -> Partial<Record<MetricKey, SessionMetricStatusSnapshot>>
@@ -643,6 +711,7 @@ export async function getProgramPageData(programId: string): Promise<ProgramPage
       list.push({
         session_id: row.session_id,
         session_date: row.session_date.slice(0, 10),
+        week_number: sessionWeekNumById.get(row.session_id) ?? null,
         status_key: row.status_key,
         change_value: toNum(row.change_value),
       });
@@ -909,9 +978,13 @@ export async function getProgramPageData(programId: string): Promise<ProgramPage
 
   // Build Weeks of the Program
   const prevWeekCategoryAvgs = new Map<string, number>(); // question_id -> avg from prior week
-  const weeks: ProgramWeekData[] = rawWeeks.map((rw) => {
+  const allWeeks: ProgramWeekData[] = rawWeeks.map((rw) => {
     const weekSessions = sessions.filter((s) => s.week_id === rw.week_id);
     const submittedWeekSessions = weekSessions.filter((s) => s.submitted_at != null);
+    const submittedWeekSessionIds = new Set(submittedWeekSessions.map((s) => s.session_id));
+    const newRegistrationsCount = rawBeneficiaries.filter((rb) =>
+      submittedWeekSessionIds.has(rb.registered_session_id)
+    ).length;
     const weekState = computeWeekState(
       {
         week_start_date: rw.week_start_date,
@@ -979,10 +1052,11 @@ export async function getProgramPageData(programId: string): Promise<ProgramPage
         reachAttended++;
       }
 
-      if (attendedInWeek === eligibleSessions.length) {
-        allDays++;
-      } else if (attendedInWeek === 0) {
+      const weekSubmittedCount = submittedWeekSessions.length;
+      if (attendedInWeek === 0) {
         zeroDays++;
+      } else if (attendedInWeek >= weekSubmittedCount) {
+        allDays++;
       } else if (attendedInWeek === 1) {
         oneDay++;
       } else {
@@ -1109,6 +1183,7 @@ export async function getProgramPageData(programId: string): Promise<ProgramPage
         reach_attended: reachAttended,
         reach_eligible: reachEligible,
         reach_pct: reachEligible > 0 ? Math.round((reachAttended / reachEligible) * 100) : 0,
+        new_registrations_count: newRegistrationsCount,
         consistency: {
           all_days: allDays,
           two_to_three_days: twoToThreeDays,
@@ -1143,42 +1218,86 @@ export async function getProgramPageData(programId: string): Promise<ProgramPage
     };
   });
 
-  // Build latest status map per beneficiary from `v_latest_metric_status` view rows
+  // Trim trailing 0-session weeks past the final scheduled session (keeping any middle 0-session weeks)
+  let lastScheduledWeekIdx = -1;
+  for (let i = allWeeks.length - 1; i >= 0; i--) {
+    if (allWeeks[i].sessions.length > 0) {
+      lastScheduledWeekIdx = i;
+      break;
+    }
+  }
+  const weeks: ProgramWeekData[] =
+    lastScheduledWeekIdx >= 0 ? allWeeks.slice(0, lastScheduledWeekIdx + 1) : allWeeks;
+  program.week_total = weeks.length;
+
+  const resolveSessionMetricMeasurement = (
+    metric: MetricKey,
+    beneficiaryCode: string,
+    sessionId: string,
+    sessionDate: string
+  ): { numeric: number | null; display: string } => {
+    const rb = rawBenByCode.get(beneficiaryCode);
+    const benRecMap = presentRecordsByBenSession.get(beneficiaryCode);
+    const rawRec = benRecMap?.get(sessionId);
+    const resolved = resolvedBySessionBen.get(`${sessionId}__${beneficiaryCode}`);
+
+    if (metric === 'bmi') {
+      const bmi = resolved?.bmi ?? null;
+      if (bmi != null && rb) {
+        const months = ageInMonths(Number(rb.birth_month), Number(rb.birth_year), sessionDate);
+        if (months < 216) {
+          const z = approxBmiForAgeZ(bmi, months, rb.sex);
+          return {
+            numeric: bmi,
+            display: z != null ? `${bmi.toFixed(1)} (z ${z >= 0 ? '+' : ''}${z.toFixed(2)})` : `${bmi.toFixed(1)}`,
+          };
+        }
+        return { numeric: bmi, display: `${bmi.toFixed(1)} kg/m²` };
+      }
+      return { numeric: null, display: '—' };
+    }
+
+    if (metric === 'whtr') {
+      const whtr = resolved?.whtr ?? null;
+      return whtr != null ? { numeric: whtr, display: whtr.toFixed(2) } : { numeric: null, display: '—' };
+    }
+
+    if (metric === 'muac') {
+      const muac = toNum(rawRec?.muac_cm);
+      return muac != null ? { numeric: muac, display: `${muac.toFixed(1)} cm` } : { numeric: null, display: '—' };
+    }
+
+    if (rawRec?.edema !== null && rawRec?.edema !== undefined) {
+      return { numeric: null, display: Boolean(rawRec.edema) ? 'Present' : 'Absent' };
+    }
+    return { numeric: null, display: '—' };
+  };
+
+  // Ordered list of submitted sessions (chronological by session_date)
   const submittedSessions = sessions.filter((s) => s.submitted_at != null);
+  const submittedSessionsList: SubmittedSessionInfo[] = submittedSessions.map((s, idx) => ({
+    session_id: s.session_id,
+    session_number: idx + 1,
+    session_date: s.session_date,
+  }));
+  const submittedSessionNumById = new Map<string, number>();
+  for (const ss of submittedSessionsList) {
+    submittedSessionNumById.set(ss.session_id, ss.session_number);
+  }
+
+  // Build latest status map per beneficiary from `v_latest_metric_status` view rows
   const benLatestMetricMap = new Map<string, Partial<Record<MetricKey, BeneficiaryLatestMetricStatus>>>();
 
   for (const row of rawLatestViewRows) {
-    const rb = rawBenByCode.get(row.beneficiary_code);
-    const benRecMap = presentRecordsByBenSession.get(row.beneficiary_code);
-    const rawRec = benRecMap?.get(row.session_id);
-    const resolved = resolvedBySessionBen.get(`${row.session_id}__${row.beneficiary_code}`);
     const sDate = row.session_date.slice(0, 10);
     const daysOld = getMetricDaysOld(sDate, today);
     const outdated = isMetricOutdated(sDate, today);
-
-    let latestValDisplay = '—';
-    if (row.metric === 'bmi') {
-      const bmi = resolved?.bmi ?? null;
-      if (bmi != null && rb) {
-        const months = ageInMonths(Number(rb.birth_month), Number(rb.birth_year), sDate);
-        if (months < 216) {
-          const z = approxBmiForAgeZ(bmi, months, rb.sex);
-          latestValDisplay = z != null ? `${bmi.toFixed(1)} (z ${z >= 0 ? '+' : ''}${z.toFixed(2)})` : `${bmi.toFixed(1)}`;
-        } else {
-          latestValDisplay = `${bmi.toFixed(1)} kg/m²`;
-        }
-      }
-    } else if (row.metric === 'whtr') {
-      const whtr = resolved?.whtr ?? null;
-      if (whtr != null) latestValDisplay = whtr.toFixed(2);
-    } else if (row.metric === 'muac') {
-      const muac = toNum(rawRec?.muac_cm);
-      if (muac != null) latestValDisplay = `${muac.toFixed(1)} cm`;
-    } else if (row.metric === 'edema') {
-      if (rawRec?.edema !== null && rawRec?.edema !== undefined) {
-        latestValDisplay = Boolean(rawRec.edema) ? 'Present' : 'Absent';
-      }
-    }
+    const measuredVal = resolveSessionMetricMeasurement(
+      row.metric,
+      row.beneficiary_code,
+      row.session_id,
+      sDate
+    );
 
     const entry = benLatestMetricMap.get(row.beneficiary_code) ?? {};
     entry[row.metric] = {
@@ -1189,7 +1308,7 @@ export async function getProgramPageData(programId: string): Promise<ProgramPage
       change_value: toNum(row.change_value),
       days_old: daysOld,
       is_outdated: outdated,
-      latest_value_display: latestValDisplay,
+      latest_value_display: measuredVal.display,
     };
     benLatestMetricMap.set(row.beneficiary_code, entry);
   }
@@ -1356,7 +1475,7 @@ export async function getProgramPageData(programId: string): Promise<ProgramPage
   const outdatedRows: OutdatedModalRow[] = [];
 
   for (const b of beneficiaries) {
-    for (const metric of ALL_METRICS) {
+    for (const metric of availableMetrics) {
       const st = b.latest_statuses[metric];
       if (!st) continue;
 
@@ -1397,11 +1516,133 @@ export async function getProgramPageData(programId: string): Promise<ProgramPage
     }
   }
 
-  for (const metric of ALL_METRICS) {
+  for (const metric of availableMetrics) {
     monitorRows[metric].sort((a, b) => a.session_date.localeCompare(b.session_date));
     monitorCloselyRows[metric].sort((a, b) => a.session_date.localeCompare(b.session_date));
   }
   outdatedRows.sort((a, b) => b.days_old - a.days_old || a.display_name.localeCompare(b.display_name));
+
+  // Build First-vs-Latest Session Cohort tracking per available metric (submitted sessions only)
+  const cohortTracking: Partial<Record<MetricKey, MetricCohortSummary>> = {};
+  for (const metric of availableMetrics) {
+    const cohortRows: BeneficiaryCohortRow[] = [];
+    let singleMeasurementCount = 0;
+    let improvedCount = 0;
+    let unchangedCount = 0;
+    let declinedCount = 0;
+
+    for (const b of beneficiaries) {
+      const history = b.metric_history[metric] ?? [];
+      if (history.length === 0) continue;
+
+      // history is ordered chronologically by session_date ASC (submitted sessions only)
+      const firstPoint = history[0];
+      const latestViewRow = b.latest_statuses[metric];
+      const latestPoint = history[history.length - 1];
+
+      const firstSessionId = firstPoint.session_id;
+      const firstSessionDate = firstPoint.session_date;
+      const firstStatus = firstPoint.status_key;
+
+      const latestSessionId = latestViewRow?.session_id ?? latestPoint.session_id;
+      const latestSessionDate = latestViewRow?.session_date ?? latestPoint.session_date;
+      const latestStatus = latestViewRow?.status_key ?? latestPoint.status_key;
+
+      const measurementCount = history.length;
+
+      // Count session_record rows where is_present = TRUE in submitted sessions on or after first_session_id date
+      const benRecMap = presentRecordsByBenSession.get(b.beneficiary_code);
+      let sessionsAttended = 0;
+      for (const ss of submittedSessionsList) {
+        if (ss.session_date >= firstSessionDate) {
+          const rec = benRecMap?.get(ss.session_id);
+          if (rec && Boolean(rec.is_present)) {
+            sessionsAttended++;
+          }
+        }
+      }
+
+      const firstMeasured = resolveSessionMetricMeasurement(
+        metric,
+        b.beneficiary_code,
+        firstSessionId,
+        firstSessionDate
+      );
+      const latestMeasured = resolveSessionMetricMeasurement(
+        metric,
+        b.beneficiary_code,
+        latestSessionId,
+        latestSessionDate
+      );
+
+      let netChange: number | null = null;
+      if (
+        metric !== 'edema' &&
+        measurementCount >= 2 &&
+        firstMeasured.numeric !== null &&
+        latestMeasured.numeric !== null
+      ) {
+        const dp = metric === 'bmi' ? 2 : metric === 'whtr' ? 3 : 1;
+        netChange = round(latestMeasured.numeric - firstMeasured.numeric, dp);
+      }
+
+      const transitionTag = classifyCohortTransitionTag(
+        firstStatus,
+        latestStatus,
+        measurementCount
+      );
+      if (transitionTag === 'single_measurement') singleMeasurementCount++;
+      else if (transitionTag === 'improved') improvedCount++;
+      else if (transitionTag === 'unchanged') unchangedCount++;
+      else declinedCount++;
+
+      cohortRows.push({
+        beneficiary_code: b.beneficiary_code,
+        display_name: b.displayName,
+        metric,
+        first_session_id: firstSessionId,
+        first_session_number: submittedSessionNumById.get(firstSessionId) ?? 0,
+        first_session_date: firstSessionDate,
+        first_status: firstStatus,
+        first_value: firstMeasured.numeric,
+        first_value_display: firstMeasured.display,
+        latest_session_id: latestSessionId,
+        latest_session_number: submittedSessionNumById.get(latestSessionId) ?? 0,
+        latest_session_date: latestSessionDate,
+        latest_status: latestStatus,
+        latest_value: latestMeasured.numeric,
+        latest_value_display: latestMeasured.display,
+        measurement_count: measurementCount,
+        sessions_attended: sessionsAttended,
+        net_change: netChange,
+        transition_tag: transitionTag,
+      });
+    }
+
+    const tagOrder: Record<CohortTransitionTag, number> = {
+      declined: 0,
+      improved: 1,
+      single_measurement: 2,
+      unchanged: 3,
+    };
+    cohortRows.sort((a, b) => {
+      const td = tagOrder[a.transition_tag] - tagOrder[b.transition_tag];
+      if (td !== 0) return td;
+      return a.display_name.localeCompare(b.display_name);
+    });
+
+    cohortTracking[metric] = {
+      metric,
+      label: metric === 'bmi' ? 'BMI' : metric === 'whtr' ? 'WHtR' : metric === 'muac' ? 'MUAC' : 'Edema',
+      total_measured: cohortRows.length,
+      no_status_count: Math.max(0, enrolledCount - cohortRows.length),
+      single_measurement_count: singleMeasurementCount,
+      improved_count: improvedCount,
+      unchanged_count: unchangedCount,
+      declined_count: declinedCount,
+      rows: cohortRows,
+    };
+  }
 
   return {
     program,
@@ -1409,7 +1650,10 @@ export async function getProgramPageData(programId: string): Promise<ProgramPage
     weeks,
     nutritionalStatus: {
       has_nutritionist: hasNutritionist,
+      available_metrics: availableMetrics,
       enrolled_count: enrolledCount,
+      submitted_sessions: submittedSessionsList,
+      cohort_tracking: cohortTracking,
       metrics: metricSummaries,
       monitor_rows: monitorRows,
       monitor_closely_rows: monitorCloselyRows,

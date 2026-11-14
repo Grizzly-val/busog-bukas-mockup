@@ -414,9 +414,42 @@ export const TRANSITION_DIRECTION_META: Record<
 export type MetricStatusHistoryPoint = {
   session_id: string;
   session_date: string;
+  week_number?: number | null;
   status_key: StatusKey;
   change_value: number | null;
 };
+
+// ---------------------------------------------------------------------------
+// First-vs-Latest Session Cohort transition helpers
+// ---------------------------------------------------------------------------
+
+export type CohortTransitionTag = 'single_measurement' | 'improved' | 'unchanged' | 'declined';
+
+export const COHORT_TRANSITION_TAG_META: Record<
+  CohortTransitionTag,
+  { label: string; badgeClass: string }
+> = {
+  single_measurement: { label: 'Single measurement', badgeClass: 'badge-pale-info' },
+  improved: { label: 'Improved', badgeClass: 'badge-pale-success' },
+  unchanged: { label: 'Unchanged', badgeClass: 'badge-pale-neutral' },
+  declined: { label: 'Declined', badgeClass: 'badge-pale-danger' },
+};
+
+/**
+ * Classifies a beneficiary's first-vs-latest submitted status progression for a single metric.
+ * Uses `baseline (0) < monitor (1) < monitor_closely (2)`.
+ */
+export function classifyCohortTransitionTag(
+  firstStatus: StatusKey,
+  latestStatus: StatusKey,
+  measurementCount: number
+): CohortTransitionTag {
+  if (measurementCount <= 1) return 'single_measurement';
+  const severityDelta = STATUS_SEVERITY[latestStatus] - STATUS_SEVERITY[firstStatus];
+  if (severityDelta < 0) return 'improved';
+  if (severityDelta > 0) return 'declined';
+  return 'unchanged';
+}
 
 export type BeneficiaryTransitionEntry = {
   beneficiary_code: string;

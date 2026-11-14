@@ -108,7 +108,7 @@ export type FilterableBeneficiaryRow = {
 };
 
 /**
- * Parses the "Attended more than __ sessions" input.
+ * Parses the "Attended >= __ sessions" input.
  * Returns null if blank or not a valid finite number.
  */
 export function parseMinAttendedThreshold(input: string | number | null | undefined): number | null {
@@ -123,9 +123,9 @@ export function parseMinAttendedThreshold(input: string | number | null | undefi
 }
 
 /**
- * Pure filter function used by both the Program Beneficiaries table and the Summarize panel
+ * Pure filter function used by both the Program Beneficiaries table and the Summarize modal
  * (excludes the search box query).
- * Note: `minAttendedSessions` applies strictly greater than (`attended_count > threshold`).
+ * Note: `minAttendedSessions` applies greater than or equal to (`attended_count >= threshold`).
  */
 export function filterBeneficiariesByCriteria<T extends FilterableBeneficiaryRow>(
   rows: ReadonlyArray<T>,
@@ -162,7 +162,7 @@ export function filterBeneficiariesByCriteria<T extends FilterableBeneficiaryRow
 
     if (warningOnly && !b.needs_measurement_warning) return false;
 
-    if (minAttended !== null && !(b.attended_count > minAttended)) return false;
+    if (minAttended !== null && !(b.attended_count >= minAttended)) return false;
 
     return true;
   });

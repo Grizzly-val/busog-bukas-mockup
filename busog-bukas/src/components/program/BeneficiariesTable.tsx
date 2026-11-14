@@ -10,7 +10,6 @@ import {
   METRIC_LABEL,
   STATUS_BADGE_CLASS,
   STATUS_LABEL,
-  STATUS_SEVERITY,
   type StatusKey,
 } from '@/lib/statusRule';
 import { getWeekColor } from '@/lib/timelineRules';
@@ -24,6 +23,7 @@ import {
 
 type Props = {
   beneficiaries: BeneficiaryData[];
+  hasNutritionist?: boolean;
   today: string;
   sessions?: SessionData[];
   weeks?: ProgramWeekData[];
@@ -34,7 +34,6 @@ type SortField =
   | 'name'
   | 'age'
   | 'sex'
-  | 'status'
   | 'bmi_optimality'
   | 'whtr_optimality'
   | 'weight_change'
@@ -45,7 +44,6 @@ type SummaryFilterSnapshot = {
   statusFilter: 'all' | StatusKey | 'none';
   ageFilter: 'all' | 'minor' | 'adult';
   sexFilter: 'all' | 'female' | 'male';
-  warningOnly: boolean;
   minAttendedInput: string;
 };
 
@@ -71,6 +69,7 @@ function formatMonthDay(dateStr: string): string {
 
 export default function BeneficiariesTable({
   beneficiaries,
+  hasNutritionist,
   sessions,
   weeks,
 }: Props) {
@@ -78,10 +77,10 @@ export default function BeneficiariesTable({
   const [statusFilter, setStatusFilter] = useState<'all' | StatusKey | 'none'>('all');
   const [ageFilter, setAgeFilter] = useState<'all' | 'minor' | 'adult'>('all');
   const [sexFilter, setSexFilter] = useState<'all' | 'female' | 'male'>('all');
-  const [warningOnly, setWarningOnly] = useState(false);
   const [minAttendedInput, setMinAttendedInput] = useState('');
 
-  // Snapshot state for "Filter, then Summarize"
+  // Snapshot state + modal open state for "Filter, then Summarize"
+  const [isSummaryModalOpen, setIsSummaryModalOpen] = useState(false);
   const [summarySnapshot, setSummarySnapshot] = useState<{
     summary: FilteredBeneficiariesSummary;
     filters: SummaryFilterSnapshot;
@@ -94,6 +93,7 @@ export default function BeneficiariesTable({
   // Client hydration flag for Portal rendering
   const [mounted, setMounted] = useState(false);
   const modalContainerRef = useRef<HTMLDivElement>(null);
+  const summaryModalRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -102,9 +102,19 @@ export default function BeneficiariesTable({
   // Selected beneficiary for detail modal
   const [selectedBeneficiary, setSelectedBeneficiary] = useState<BeneficiaryData | null>(null);
 
-  // Lock parent body scroll, trap focus, and handle keyboard controls when modal is active
+  const showMuacSummary = useMemo(
+    () =>
+      hasNutritionist ??
+      beneficiaries.some(
+        (b) => b.latest_statuses.muac != null || b.measurements.some((m) => m.muac_cm != null)
+      ),
+    [hasNutritionist, beneficiaries]
+  );
+
+  // Lock parent body scroll and handle Escape key when either modal is active
   useEffect(() => {
-    if (!selectedBeneficiary) return;
+    const activeDialog = selectedBeneficiary || isSummaryModalOpen;
+    if (!activeDialog) return;
 
     const originalOverflow = document.body.style.overflow;
     const originalPaddingRight = document.body.style.paddingRight;
@@ -115,14 +125,21 @@ export default function BeneficiariesTable({
       document.body.style.paddingRight = `${scrollbarWidth}px`;
     }
 
-    // Shift focus into modal card so PageDown/Up, arrows, and keyboard inputs target modal
     const focusTimer = setTimeout(() => {
-      modalContainerRef.current?.focus();
+      if (selectedBeneficiary) {
+        modalContainerRef.current?.focus();
+      } else if (isSummaryModalOpen) {
+        summaryModalRef.current?.focus();
+      }
     }, 20);
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        setSelectedBeneficiary(null);
+        if (selectedBeneficiary) {
+          setSelectedBeneficiary(null);
+        } else if (isSummaryModalOpen) {
+          setIsSummaryModalOpen(false);
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -133,7 +150,7 @@ export default function BeneficiariesTable({
       document.body.style.paddingRight = originalPaddingRight;
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [selectedBeneficiary]);
+  }, [selectedBeneficiary, isSummaryModalOpen]);
 
   // Map of sorted sessions to chronological session numbers (1, 2, 3...)
   const sessionChronologicalMap = useMemo(() => {
@@ -170,21 +187,15 @@ export default function BeneficiariesTable({
     };
   };
 
-  const needsMeasurementCount = useMemo(
-    () => beneficiaries.filter((b) => b.needs_measurement_warning).length,
-    [beneficiaries]
-  );
-
-  // Beneficiaries matching the 5 cohort filters (ignoring the search box)
+  // Beneficiaries matching the 4 cohort filters (ignoring the search box)
   const filterMatched = useMemo(() => {
     return filterBeneficiariesByCriteria(beneficiaries, {
       statusFilter,
       ageFilter,
       sexFilter,
-      warningOnly,
       minAttendedSessions: minAttendedInput,
     });
-  }, [beneficiaries, statusFilter, ageFilter, sexFilter, warningOnly, minAttendedInput]);
+  }, [beneficiaries, statusFilter, ageFilter, sexFilter, minAttendedInput]);
 
   // Filtered & Sorted beneficiaries for the table (applies search on top of cohort filters)
   const filtered = useMemo(() => {
@@ -206,23 +217,11 @@ export default function BeneficiariesTable({
         statusFilter,
         ageFilter,
         sexFilter,
-        warningOnly,
         minAttendedInput: minAttendedInput.trim(),
       },
     });
+    setIsSummaryModalOpen(true);
   };
-
-  const isSummaryOutOfDate = useMemo(() => {
-    if (!summarySnapshot) return false;
-    const f = summarySnapshot.filters;
-    return (
-      f.statusFilter !== statusFilter ||
-      f.ageFilter !== ageFilter ||
-      f.sexFilter !== sexFilter ||
-      f.warningOnly !== warningOnly ||
-      parseMinAttendedThreshold(f.minAttendedInput) !== parseMinAttendedThreshold(minAttendedInput)
-    );
-  }, [summarySnapshot, statusFilter, ageFilter, sexFilter, warningOnly, minAttendedInput]);
 
   const appliedFilterChips = useMemo(() => {
     if (!summarySnapshot) return [];
@@ -239,15 +238,12 @@ export default function BeneficiariesTable({
     if (f.sexFilter !== 'all') {
       chips.push(`Sex: ${f.sexFilter === 'female' ? 'Female' : 'Male'}`);
     }
-    if (f.warningOnly) {
-      chips.push('Needs measurement only');
-    }
     const minAttended = parseMinAttendedThreshold(f.minAttendedInput);
     if (minAttended !== null) {
-      chips.push(`Attended > ${minAttended} session${minAttended === 1 ? '' : 's'}`);
+      chips.push(`Attended ≥ ${minAttended} session${minAttended === 1 ? '' : 's'}`);
     }
     if (chips.length === 0) {
-      chips.push('All enrolled beneficiaries (no active filters)');
+      chips.push('All enrolled beneficiaries');
     }
     return chips;
   }, [summarySnapshot]);
@@ -269,14 +265,6 @@ export default function BeneficiariesTable({
         case 'sex':
           cmp = a.sex.localeCompare(b.sex);
           break;
-        case 'status': {
-          const maxSev = (ben: BeneficiaryData) => {
-            const vals = ALL_METRICS.map((m) => ben.latest_statuses[m]?.status_key).filter(Boolean) as StatusKey[];
-            return vals.length > 0 ? Math.max(...vals.map((s) => STATUS_SEVERITY[s])) : -1;
-          };
-          cmp = maxSev(a) - maxSev(b);
-          break;
-        }
         case 'bmi_optimality':
           cmp = (a.latest_statuses.bmi?.change_value ?? -999) - (b.latest_statuses.bmi?.change_value ?? -999);
           break;
@@ -322,18 +310,22 @@ export default function BeneficiariesTable({
   };
 
   return (
-    <div className="card bb-card overflow-hidden shadow-sm">
-      <div className="card-header bg-white border-bottom p-3 p-md-4">
-        <div className="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+    <div className="card bb-card overflow-hidden">
+      <div className="px-4 pt-4 pb-3 border-bottom" style={{ borderColor: 'rgba(0,0,0,0.06)' }}>
+        <div className="d-flex flex-wrap justify-content-between align-items-baseline gap-2 mb-3">
           <div>
-            <h2 className="h5 fw-bold mb-1 text-dark">Program Beneficiaries</h2>
+            <div className="d-flex align-items-baseline gap-2 mb-1">
+              <h2 className="h5 fw-bold mb-0 text-dark" style={{ letterSpacing: '-0.015em' }}>
+                Program Beneficiaries
+              </h2>
+              <span className="small text-body-secondary bb-num">
+                {beneficiaries.length} enrolled
+              </span>
+            </div>
             <p className="text-body-secondary small mb-0">
-              Profiles, per-metric latest statuses (<code>v_latest_*</code>), measurement deltas, and attendance since registration.
+              Profiles, measurement deltas, and attendance since registration. Select a row for full history.
             </p>
           </div>
-          <span className="badge rounded-pill text-bg-light border px-3 py-2">
-            Total: <strong>{beneficiaries.length}</strong> enrolled
-          </span>
         </div>
 
         {/* Search & Filter Toolbar */}
@@ -418,7 +410,7 @@ export default function BeneficiariesTable({
             </select>
           </div>
 
-          {/* Attended more than __ sessions (strictly greater than: attended_count > x) */}
+          {/* Attended >= __ sessions (attended_count >= X) */}
           <div style={{ flex: '0 0 auto' }}>
             <div
               className={`d-inline-flex align-items-center gap-1 rounded-2 px-2 border ${
@@ -427,14 +419,14 @@ export default function BeneficiariesTable({
                   : 'border-secondary-subtle bg-white'
               }`}
               style={{ height: '31px' }}
-              title="Filter beneficiaries who attended strictly more than X sessions (attended_count > X; leave blank for no filter)"
+              title="Filter beneficiaries who attended at least X sessions (attended_count >= X; leave blank for no filter)"
             >
               <label
                 htmlFor="beneficiary-min-attended-input"
                 className="small text-body-secondary text-nowrap mb-0"
                 style={{ fontSize: '0.8rem', cursor: 'pointer' }}
               >
-                Attended &gt;
+                Attended ≥
               </label>
               <input
                 id="beneficiary-min-attended-input"
@@ -450,7 +442,7 @@ export default function BeneficiariesTable({
                   flex: '0 0 54px',
                 }}
                 placeholder="any"
-                aria-label="Attended more than sessions"
+                aria-label="Attended at least sessions"
                 value={minAttendedInput}
                 onChange={(e) => {
                   setMinAttendedInput(e.target.value);
@@ -481,306 +473,42 @@ export default function BeneficiariesTable({
             </div>
           </div>
 
-          {/* Warning Toggle + Last Measured X Sessions Ago Badge */}
-          <div className="d-inline-flex align-items-center gap-2" style={{ flex: '0 0 auto' }}>
-            <button
-              type="button"
-              className={`btn btn-sm rounded-pill text-nowrap px-3 ${
-                warningOnly ? 'btn-warning fw-semibold' : 'btn-outline-warning text-dark'
-              }`}
-              onClick={() => {
-                setWarningOnly(!warningOnly);
-                setPage(1);
-              }}
-            >
-              Needs measurement
-            </button>
-            <span
-              className="badge rounded-pill badge-pale-warning bb-num"
-              title="Beneficiaries last measured 1 or more submitted sessions ago"
-            >
-              Last measured ≥1 session ago ({needsMeasurementCount})
-            </span>
-          </div>
-
           {/* Summarize Button */}
           <div className="ms-md-auto" style={{ flex: '0 0 auto' }}>
             <button
               type="button"
-              className={`btn btn-sm rounded-pill fw-semibold text-nowrap px-3 ${
-                isSummaryOutOfDate ? 'btn-primary' : 'btn-dark'
-              }`}
+              className="bb-action-chip bb-action-chip-primary"
               onClick={handleSummarize}
-              title="Summarize first-to-latest Weight, Waist, and MUAC changes across beneficiaries matching the current filters (ignores search box)"
+              title={`Summarize first-to-latest Weight, Waist${showMuacSummary ? ', and MUAC' : ''} changes across beneficiaries matching the current filters (ignores search box)`}
             >
-              {isSummaryOutOfDate ? 'Update Summary' : 'Summarize'}
+              <span>Summarize</span>
+              <span className="bb-num opacity-75">{filterMatched.length}</span>
             </button>
           </div>
         </div>
-
-        {/* Filter, then Summarize Panel */}
-        {summarySnapshot && (
-          <div
-            className={`mt-3 p-3 p-md-4 rounded-4 border ${
-              isSummaryOutOfDate ? 'bg-warning-subtle border-warning' : 'bg-light-subtle'
-            }`}
-          >
-            <div className="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
-              <div>
-                <div className="d-flex flex-wrap align-items-center gap-2">
-                  <h3 className="h6 fw-bold mb-0 text-dark">
-                    Filtered Cohort Summary (1st → Latest Measurement)
-                  </h3>
-                  <span className="badge rounded-pill text-bg-dark bb-num">
-                    {summarySnapshot.summary.totalMatching} matching beneficiar
-                    {summarySnapshot.summary.totalMatching === 1 ? 'y' : 'ies'}
-                  </span>
-                  {isSummaryOutOfDate ? (
-                    <span className="badge rounded-pill text-bg-warning text-dark fw-semibold">
-                      Out of date — filters changed
-                    </span>
-                  ) : (
-                    <span className="badge rounded-pill bg-white text-secondary border">
-                      Snapshot up to date
-                    </span>
-                  )}
-                </div>
-                <div className="d-flex flex-wrap align-items-center gap-1 mt-2">
-                  <span className="small text-body-secondary me-1" style={{ fontSize: '0.75rem' }}>
-                    Applied filters:
-                  </span>
-                  {appliedFilterChips.map((chip) => (
-                    <span
-                      key={chip}
-                      className="badge rounded-pill bg-white text-dark border fw-medium"
-                      style={{ fontSize: '0.73rem' }}
-                    >
-                      {chip}
-                    </span>
-                  ))}
-                  <span
-                    className="small text-body-secondary ms-1"
-                    style={{ fontSize: '0.72rem' }}
-                  >
-                    · Search query is not applied to summary
-                  </span>
-                </div>
-              </div>
-
-              <div className="d-flex align-items-center gap-2">
-                {isSummaryOutOfDate && (
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-primary rounded-pill fw-semibold text-nowrap px-3"
-                    onClick={handleSummarize}
-                  >
-                    Re-compute Summary
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="btn btn-sm btn-outline-secondary rounded-pill text-nowrap px-3"
-                  onClick={() => setSummarySnapshot(null)}
-                  aria-label="Close summary panel"
-                >
-                  Dismiss
-                </button>
-              </div>
-            </div>
-
-            {summarySnapshot.summary.smallSampleWarning && (
-              <div className="alert alert-warning border-0 py-2 px-3 small mb-3 rounded-3">
-                <strong>Small sample notice:</strong> Only{' '}
-                <strong className="bb-num">{summarySnapshot.summary.totalMatching}</strong>{' '}
-                beneficiar{summarySnapshot.summary.totalMatching === 1 ? 'y matches' : 'ies match'}{' '}
-                the current filters (&lt; 5). Group averages are shown below, but interpret with caution.
-              </div>
-            )}
-
-            <div className="table-responsive bg-white rounded-3 border">
-              <table className="table table-sm table-borderless align-middle mb-0 small">
-                <thead className="table-light border-bottom">
-                  <tr
-                    className="text-uppercase text-body-secondary"
-                    style={{ fontSize: '0.7rem', letterSpacing: '0.03em' }}
-                  >
-                    <th scope="col" className="ps-3 py-2" style={{ width: '210px' }}>
-                      Direction (1st → Latest)
-                    </th>
-                    <th scope="col" className="text-end py-2" style={{ width: '120px' }}>
-                      Beneficiaries (n)
-                    </th>
-                    <th scope="col" className="text-end pe-3 py-2" style={{ width: '150px' }}>
-                      Average Change
-                    </th>
-                    <th scope="col" className="ps-3 pe-3 py-2 border-start">
-                      Data Coverage &amp; Unchanged Breakdown (of {summarySnapshot.summary.totalMatching} Matching)
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[
-                    summarySnapshot.summary.weight,
-                    summarySnapshot.summary.waist,
-                    summarySnapshot.summary.muac,
-                  ].flatMap((metric) => {
-                    const total = summarySnapshot.summary.totalMatching;
-                    const changedCount = metric.increased.n + metric.decreased.n;
-                    const changedPct = total > 0 ? (changedCount / total) * 100 : 0;
-                    const unchPct = total > 0 ? (metric.unchangedCount / total) * 100 : 0;
-                    const noDataPct = total > 0 ? (metric.noDataCount / total) * 100 : 0;
-
-                    return [
-                      <tr key={`${metric.key}-inc`} className="border-top">
-                        <td className="ps-3 py-2 fw-semibold text-dark">
-                          <span className="text-body-secondary me-1">↑</span>
-                          {metric.label} increased
-                        </td>
-                        <td className="text-end py-2 bb-num fw-semibold text-dark">
-                          {metric.increased.n}
-                        </td>
-                        <td className="text-end pe-3 py-2 bb-num fw-medium text-dark">
-                          {formatSummaryMean(metric.increased.mean, metric.unit)}
-                        </td>
-                        <td
-                          rowSpan={2}
-                          className="ps-3 pe-3 py-2 align-middle border-start bg-light-subtle"
-                        >
-                          {/* Segmented Coverage Bar */}
-                          {total > 0 && (
-                            <div
-                              className="progress mb-2 bg-white border"
-                              style={{ height: '5px', borderRadius: '999px', overflow: 'hidden' }}
-                            >
-                              <div
-                                className="progress-bar"
-                                style={{ width: `${changedPct}%`, backgroundColor: '#334155' }}
-                                title={`Changed (Increased or Decreased): ${changedCount}`}
-                              />
-                              <div
-                                className="progress-bar"
-                                style={{ width: `${unchPct}%`, backgroundColor: '#94a3b8' }}
-                                title={`Unchanged (same value): ${metric.unchangedCount}`}
-                              />
-                              <div
-                                className="progress-bar"
-                                style={{ width: `${noDataPct}%`, backgroundColor: '#cbd5e1' }}
-                                title={`No paired data (<2 measurements): ${metric.noDataCount}`}
-                              />
-                            </div>
-                          )}
-
-                          {/* 3-Column Plain-English Breakdown */}
-                          <div className="row g-2 text-start bb-num">
-                            <div className="col-12 col-sm-4">
-                              <div className="p-2 rounded-2 bg-white border h-100">
-                                <div className="d-flex justify-content-between align-items-baseline">
-                                  <span className="text-body-secondary" style={{ fontSize: '0.72rem' }}>
-                                    Changed (↑ / ↓)
-                                  </span>
-                                  <strong className="text-dark" style={{ fontSize: '0.85rem' }}>
-                                    {changedCount}
-                                  </strong>
-                                </div>
-                                <small
-                                  className="text-body-secondary d-block"
-                                  style={{ fontSize: '0.68rem' }}
-                                >
-                                  {metric.increased.n} increased · {metric.decreased.n} decreased
-                                </small>
-                              </div>
-                            </div>
-
-                            <div className="col-6 col-sm-4">
-                              <div className="p-2 rounded-2 bg-white border h-100">
-                                <div className="d-flex justify-content-between align-items-baseline">
-                                  <span className="text-body-secondary" style={{ fontSize: '0.72rem' }}>
-                                    Unchanged
-                                  </span>
-                                  <strong className="text-dark" style={{ fontSize: '0.85rem' }}>
-                                    {metric.unchangedCount}
-                                  </strong>
-                                </div>
-                                <small
-                                  className="text-body-secondary d-block"
-                                  style={{ fontSize: '0.68rem' }}
-                                >
-                                  Same 1st &amp; latest value
-                                </small>
-                              </div>
-                            </div>
-
-                            <div className="col-6 col-sm-4">
-                              <div className="p-2 rounded-2 bg-white border h-100">
-                                <div className="d-flex justify-content-between align-items-baseline">
-                                  <span className="text-body-secondary" style={{ fontSize: '0.72rem' }}>
-                                    No paired data
-                                  </span>
-                                  <strong className="text-dark" style={{ fontSize: '0.85rem' }}>
-                                    {metric.noDataCount}
-                                  </strong>
-                                </div>
-                                <small
-                                  className="text-body-secondary d-block"
-                                  style={{ fontSize: '0.68rem' }}
-                                >
-                                  Measured in &lt; 2 sessions
-                                </small>
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-                      </tr>,
-                      <tr key={`${metric.key}-dec`}>
-                        <td className="ps-3 py-2 fw-semibold text-dark">
-                          <span className="text-body-secondary me-1">↓</span>
-                          {metric.label} decreased
-                        </td>
-                        <td className="text-end py-2 bb-num fw-semibold text-dark">
-                          {metric.decreased.n}
-                        </td>
-                        <td className="text-end pe-3 py-2 bb-num fw-medium text-dark">
-                          {formatSummaryMean(metric.decreased.mean, metric.unit)}
-                        </td>
-                      </tr>,
-                    ];
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
       </div>
 
-      {/* Main Beneficiaries Table (Action column removed, entire row clickable) */}
-      <div className="table-responsive">
-        <table className="table table-hover align-middle mb-0">
-          <thead className="table-light">
-            <tr className="small text-uppercase text-body-secondary">
-              <th scope="col" style={{ cursor: 'pointer', width: '90px' }} onClick={() => handleSort('code')}>
+      {/* Main Beneficiaries Table */}
+      <div className="table-responsive px-3 px-md-4 pt-2 pb-1">
+        <table className="bb-ns-table">
+          <thead>
+            <tr>
+              <th scope="col" style={{ cursor: 'pointer', width: '88px' }} onClick={() => handleSort('code')}>
                 Code{sortIndicator('code')}
               </th>
               <th scope="col" style={{ cursor: 'pointer' }} onClick={() => handleSort('name')}>
                 Display Name{sortIndicator('name')}
               </th>
-              <th scope="col" style={{ cursor: 'pointer', width: '95px' }} onClick={() => handleSort('age')}>
+              <th scope="col" style={{ cursor: 'pointer', width: '92px' }} onClick={() => handleSort('age')}>
                 Age{sortIndicator('age')}
               </th>
-              <th scope="col" style={{ cursor: 'pointer', width: '85px' }} onClick={() => handleSort('sex')}>
+              <th scope="col" style={{ cursor: 'pointer', width: '78px' }} onClick={() => handleSort('sex')}>
                 Sex{sortIndicator('sex')}
               </th>
               <th
                 scope="col"
-                style={{ cursor: 'pointer' }}
-                onClick={() => handleSort('status')}
-                title="Per-metric latest submitted nutritional statuses (BMI always, others if measured)"
-              >
-                Per-Metric Statuses
-                {sortIndicator('status')}
-              </th>
-              <th
-                scope="col"
-                style={{ cursor: 'pointer', width: '125px' }}
+                className="text-end"
+                style={{ cursor: 'pointer', width: '124px' }}
                 onClick={() => handleSort('bmi_optimality')}
                 title="Latest signed BMI change toward (+) or away from (-) healthy range"
               >
@@ -788,7 +516,8 @@ export default function BeneficiariesTable({
               </th>
               <th
                 scope="col"
-                style={{ cursor: 'pointer', width: '125px' }}
+                className="text-end"
+                style={{ cursor: 'pointer', width: '124px' }}
                 onClick={() => handleSort('whtr_optimality')}
                 title="Latest signed WHtR change toward (+) or away from (-) 0.47 optimal"
               >
@@ -796,7 +525,8 @@ export default function BeneficiariesTable({
               </th>
               <th
                 scope="col"
-                style={{ cursor: 'pointer', width: '130px' }}
+                className="text-end"
+                style={{ cursor: 'pointer', width: '132px' }}
                 onClick={() => handleSort('weight_change')}
                 title="Latest valid weight (kg) minus first valid weight (kg) across present sessions"
               >
@@ -804,7 +534,8 @@ export default function BeneficiariesTable({
               </th>
               <th
                 scope="col"
-                style={{ cursor: 'pointer', width: '130px' }}
+                className="text-end"
+                style={{ cursor: 'pointer', width: '132px' }}
                 onClick={() => handleSort('waist_change')}
                 title="Latest valid waist circumference (cm) minus first valid waist circumference (cm) across present sessions"
               >
@@ -812,7 +543,7 @@ export default function BeneficiariesTable({
               </th>
               <th
                 scope="col"
-                style={{ cursor: 'pointer', width: '165px' }}
+                style={{ cursor: 'pointer', width: '168px' }}
                 onClick={() => handleSort('attendance')}
                 title="Attendance across submitted sessions since the beneficiary started attending"
               >
@@ -823,7 +554,7 @@ export default function BeneficiariesTable({
           <tbody>
             {pagedBeneficiaries.length === 0 ? (
               <tr>
-                <td colSpan={10} className="text-center py-5 text-body-secondary">
+                <td colSpan={9} className="text-center py-5 text-body-secondary">
                   No beneficiaries found matching the selected filters.
                 </td>
               </tr>
@@ -838,22 +569,23 @@ export default function BeneficiariesTable({
                   <tr
                     key={b.beneficiary_code}
                     onClick={() => setSelectedBeneficiary(b)}
-                    role="button"
-                    style={{ cursor: 'pointer' }}
-                    className={b.needs_measurement_warning ? 'table-warning-subtle' : ''}
+                    className="bb-history-row"
                     title="Click to view beneficiary detail modal"
                   >
                     <td>
-                      <span className="fw-mono small fw-bold">#{b.beneficiary_code}</span>
+                      <span className="fw-mono small fw-bold text-dark">#{b.beneficiary_code}</span>
                     </td>
                     <td>
-                      <div>
+                      <div className="d-flex flex-wrap align-items-center gap-1">
                         {b.name ? (
                           <span className="fw-semibold text-dark">{b.name}</span>
                         ) : b.alias ? (
                           <span className="fst-italic text-body-secondary">
                             {b.alias}
-                            <span className="badge rounded-pill bg-light border text-muted ms-1" style={{ fontSize: '0.65rem' }}>
+                            <span
+                              className="badge rounded-pill bg-light border text-muted ms-1"
+                              style={{ fontSize: '0.65rem' }}
+                            >
                               Alias
                             </span>
                           </span>
@@ -862,21 +594,11 @@ export default function BeneficiariesTable({
                         )}
 
                         {b.allergies.length > 0 && (
-                          <span className="badge text-bg-danger-subtle text-danger-emphasis ms-2" style={{ fontSize: '0.65rem' }}>
-                            {b.allergies.length} allerg{b.allergies.length > 1 ? 'ies' : 'y'}
-                          </span>
-                        )}
-
-                        {b.last_measured_sessions_ago != null && (
                           <span
-                            className={`badge rounded-pill ms-1 bb-num ${
-                              b.last_measured_sessions_ago >= 1
-                                ? 'badge-pale-warning'
-                                : 'badge-pale-success'
-                            }`}
+                            className="badge text-bg-danger-subtle text-danger-emphasis ms-1"
                             style={{ fontSize: '0.65rem' }}
                           >
-                            Last measured {b.last_measured_sessions_ago} session{b.last_measured_sessions_ago === 1 ? '' : 's'} ago
+                            {b.allergies.length} allerg{b.allergies.length > 1 ? 'ies' : 'y'}
                           </span>
                         )}
 
@@ -892,39 +614,15 @@ export default function BeneficiariesTable({
                       </div>
                     </td>
                     <td>
-                      <span>{b.age} yo</span>
+                      <span className="bb-num text-dark">{b.age} yo</span>
                       <small className="text-body-secondary d-block" style={{ fontSize: '0.7rem' }}>
                         {b.isAdult ? 'Adult' : 'Minor'}
                       </small>
                     </td>
                     <td>
-                      <span className="text-capitalize small">{b.sex}</span>
+                      <span className="text-capitalize small text-dark">{b.sex}</span>
                     </td>
-                    <td>
-                      <div className="d-flex flex-wrap gap-1" style={{ maxWidth: '280px' }}>
-                        {ALL_METRICS.map((m) => {
-                          const st = b.latest_statuses[m];
-                          if (!st) return null;
-                          return (
-                            <span
-                              key={m}
-                              className={`badge rounded-pill ${STATUS_BADGE_CLASS[st.status_key]}`}
-                              style={{ fontSize: '0.7rem' }}
-                              title={`${METRIC_LABEL[m]}: ${st.latest_value_display} (${formatDate(st.session_date)})`}
-                            >
-                              {METRIC_LABEL[m]}: {STATUS_LABEL[st.status_key]}
-                              {st.is_outdated ? ' · Outdated' : ''}
-                            </span>
-                          );
-                        })}
-                        {ALL_METRICS.every((m) => !b.latest_statuses[m]) && (
-                          <span className="badge rounded-pill badge-pale-neutral text-muted">
-                            Pending 1st session
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td>
+                    <td className="text-end">
                       {bmiChangeVal != null ? (
                         <div>
                           <span
@@ -948,7 +646,7 @@ export default function BeneficiariesTable({
                         <span className="text-body-secondary">—</span>
                       )}
                     </td>
-                    <td>
+                    <td className="text-end">
                       {whtrChangeVal != null ? (
                         <div>
                           <span
@@ -972,7 +670,7 @@ export default function BeneficiariesTable({
                         <span className="text-body-secondary">—</span>
                       )}
                     </td>
-                    <td>
+                    <td className="text-end">
                       {weightDelta != null ? (
                         <div>
                           <span
@@ -991,7 +689,7 @@ export default function BeneficiariesTable({
                         <span className="text-body-secondary">—</span>
                       )}
                     </td>
-                    <td>
+                    <td className="text-end">
                       {waistDelta != null ? (
                         <div>
                           <span
@@ -1049,8 +747,11 @@ export default function BeneficiariesTable({
       </div>
 
       {/* Pagination Footer */}
-      <div className="card-footer bg-white border-top p-3 d-flex flex-wrap justify-content-between align-items-center gap-2">
-        <span className="small text-body-secondary">
+      <div
+        className="bg-white border-top px-4 py-3 d-flex flex-wrap justify-content-between align-items-center gap-2"
+        style={{ borderColor: 'rgba(0,0,0,0.06)' }}
+      >
+        <span className="small text-body-secondary bb-num">
           Showing {sorted.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1}–
           {Math.min(currentPage * PAGE_SIZE, sorted.length)} of {sorted.length} beneficiaries
         </span>
@@ -1589,6 +1290,313 @@ export default function BeneficiariesTable({
         </div>,
         document.body
       )}
+
+      {/* Filtered Cohort Summary Pop-Up Modal */}
+      {mounted &&
+        isSummaryModalOpen &&
+        summarySnapshot &&
+        createPortal(
+          <div
+            className="bb-modal-overlay"
+            role="presentation"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setIsSummaryModalOpen(false);
+            }}
+          >
+            <div
+              ref={summaryModalRef}
+              tabIndex={-1}
+              className="bb-modal-dialog"
+              style={{ maxWidth: '820px', outline: 'none' }}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="cohortSummaryModalTitle"
+            >
+              {/* Modal Header */}
+              <div
+                className="px-4 py-3 border-bottom bg-white d-flex justify-content-between align-items-start gap-3 flex-shrink-0"
+                style={{ borderColor: 'rgba(0,0,0,0.06)' }}
+              >
+                <div>
+                  <div className="d-flex flex-wrap align-items-baseline gap-2">
+                    <h3
+                      id="cohortSummaryModalTitle"
+                      className="h5 fw-bold mb-0 text-dark"
+                      style={{ letterSpacing: '-0.015em' }}
+                    >
+                      Filtered Cohort Summary (1st → Latest Measurement)
+                    </h3>
+                    <span className="small text-body-secondary bb-num">
+                      {summarySnapshot.summary.totalMatching} matching beneficiar
+                      {summarySnapshot.summary.totalMatching === 1 ? 'y' : 'ies'}
+                    </span>
+                  </div>
+                  <div className="d-flex flex-wrap align-items-center gap-1 mt-2">
+                    <span className="small text-body-secondary me-1" style={{ fontSize: '0.75rem' }}>
+                      Filters:
+                    </span>
+                    {appliedFilterChips.map((chip) => (
+                      <span key={chip} className="bb-status-chip bg-light border text-dark">
+                        {chip}
+                      </span>
+                    ))}
+                    <span className="small text-body-secondary ms-1" style={{ fontSize: '0.73rem' }}>
+                      · Search query not applied
+                    </span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  className="btn-close mt-1"
+                  aria-label="Close modal"
+                  onClick={() => setIsSummaryModalOpen(false)}
+                />
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-4 overflow-y-auto" style={{ overscrollBehavior: 'contain' }}>
+                {summarySnapshot.summary.smallSampleWarning && (
+                  <div className="alert alert-warning border-0 py-2 px-3 small mb-3 rounded-3">
+                    <strong>Small sample notice:</strong> Only{' '}
+                    <strong className="bb-num">{summarySnapshot.summary.totalMatching}</strong>{' '}
+                    beneficiar{summarySnapshot.summary.totalMatching === 1 ? 'y matches' : 'ies match'}{' '}
+                    the current filters (&lt; 5). Interpret averages with caution.
+                  </div>
+                )}
+
+                {/* Outcome Distribution Legend */}
+                <div
+                  className="d-flex flex-wrap align-items-center gap-3 pb-3 mb-3 border-bottom small text-body-secondary"
+                  style={{ borderColor: 'rgba(0,0,0,0.06)', fontSize: '0.76rem' }}
+                >
+                  <span className="d-inline-flex align-items-center gap-1">
+                    <span
+                      className="rounded-1 d-inline-block"
+                      style={{ width: '10px', height: '10px', backgroundColor: '#15803d' }}
+                    />
+                    <span>Increased</span>
+                  </span>
+                  <span className="d-inline-flex align-items-center gap-1">
+                    <span
+                      className="rounded-1 d-inline-block"
+                      style={{ width: '10px', height: '10px', backgroundColor: '#b91c1c' }}
+                    />
+                    <span>Decreased</span>
+                  </span>
+                  <span className="d-inline-flex align-items-center gap-1">
+                    <span
+                      className="rounded-1 d-inline-block"
+                      style={{ width: '10px', height: '10px', backgroundColor: '#64748b' }}
+                    />
+                    <span>Unchanged</span>
+                  </span>
+                  <span className="d-inline-flex align-items-center gap-1">
+                    <span
+                      className="rounded-1 d-inline-block"
+                      style={{ width: '10px', height: '10px', backgroundColor: '#cbd5e1' }}
+                    />
+                    <span>No paired data (&lt;2 sessions)</span>
+                  </span>
+                </div>
+
+                {/* Per-Metric Stacked Bar & Directional Comparison Blocks */}
+                <div className="d-flex flex-column gap-3">
+                  {(showMuacSummary
+                    ? [
+                        summarySnapshot.summary.weight,
+                        summarySnapshot.summary.waist,
+                        summarySnapshot.summary.muac,
+                      ]
+                    : [summarySnapshot.summary.weight, summarySnapshot.summary.waist]
+                  ).map((metric) => {
+                    const total = summarySnapshot.summary.totalMatching;
+                    const pairedCount = metric.increased.n + metric.decreased.n + metric.unchangedCount;
+                    const incPct = total > 0 ? (metric.increased.n / total) * 100 : 0;
+                    const decPct = total > 0 ? (metric.decreased.n / total) * 100 : 0;
+                    const unchPct = total > 0 ? (metric.unchangedCount / total) * 100 : 0;
+                    const noDataPct = total > 0 ? (metric.noDataCount / total) * 100 : 0;
+
+                    return (
+                      <div key={metric.key} className="bb-cohort-metric-block">
+                        {/* Metric Header */}
+                        <div className="d-flex flex-wrap justify-content-between align-items-baseline gap-2 mb-2">
+                          <div className="d-flex align-items-baseline gap-2">
+                            <h4 className="h6 fw-bold mb-0 text-dark">{metric.label}</h4>
+                            <span className="small text-body-secondary">({metric.unit})</span>
+                          </div>
+                          <span className="small text-body-secondary bb-num">
+                            <strong className="text-dark fw-semibold">{pairedCount}</strong> of {total} with ≥2 readings
+                          </span>
+                        </div>
+
+                        {/* 100% Horizontal Stacked Outcome Bar */}
+                        <div
+                          className="bb-cohort-stack-bar mb-3"
+                          role="img"
+                          aria-label={`${metric.label}: ${metric.increased.n} increased, ${metric.decreased.n} decreased, ${metric.unchangedCount} unchanged, ${metric.noDataCount} no paired data`}
+                        >
+                          {incPct > 0 && (
+                            <div
+                              style={{ width: `${incPct}%`, backgroundColor: '#15803d' }}
+                              title={`Increased: ${metric.increased.n} (${Math.round(incPct)}%)`}
+                            />
+                          )}
+                          {decPct > 0 && (
+                            <div
+                              style={{ width: `${decPct}%`, backgroundColor: '#b91c1c' }}
+                              title={`Decreased: ${metric.decreased.n} (${Math.round(decPct)}%)`}
+                            />
+                          )}
+                          {unchPct > 0 && (
+                            <div
+                              style={{ width: `${unchPct}%`, backgroundColor: '#64748b' }}
+                              title={`Unchanged: ${metric.unchangedCount} (${Math.round(unchPct)}%)`}
+                            />
+                          )}
+                          {noDataPct > 0 && (
+                            <div
+                              style={{ width: `${noDataPct}%`, backgroundColor: '#cbd5e1' }}
+                              title={`No paired data (<2 sessions): ${metric.noDataCount} (${Math.round(noDataPct)}%)`}
+                            />
+                          )}
+                        </div>
+
+                        {/* Side-by-Side Directional Cards: Increased vs. Decreased */}
+                        <div className="row g-2">
+                          <div className="col-12 col-sm-6">
+                            <div className="bb-cohort-dir-card is-increased">
+                              <div className="d-flex justify-content-between align-items-baseline gap-2 mb-1">
+                                <span
+                                  className="small fw-semibold"
+                                  style={{ color: '#15803d' }}
+                                >
+                                  ↑ Increased
+                                </span>
+                                <span
+                                  className="fw-bold fs-6 bb-num"
+                                  style={{ color: '#14532d' }}
+                                >
+                                  {formatSummaryMean(metric.increased.mean, metric.unit)}
+                                </span>
+                              </div>
+                              <div
+                                className="d-flex justify-content-between align-items-baseline small text-body-secondary bb-num mb-2"
+                                style={{ fontSize: '0.76rem' }}
+                              >
+                                <span>
+                                  <strong className="text-dark">{metric.increased.n}</strong>{' '}
+                                  beneficiar{metric.increased.n === 1 ? 'y' : 'ies'} ({Math.round(incPct)}%)
+                                </span>
+                                <span>avg gain</span>
+                              </div>
+                              <div
+                                className="rounded-pill overflow-hidden"
+                                style={{ height: '4px', backgroundColor: 'rgba(21, 128, 61, 0.14)' }}
+                              >
+                                <div
+                                  style={{
+                                    width: `${incPct}%`,
+                                    height: '100%',
+                                    backgroundColor: '#15803d',
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="col-12 col-sm-6">
+                            <div className="bb-cohort-dir-card is-decreased">
+                              <div className="d-flex justify-content-between align-items-baseline gap-2 mb-1">
+                                <span
+                                  className="small fw-semibold"
+                                  style={{ color: '#b91c1c' }}
+                                >
+                                  ↓ Decreased
+                                </span>
+                                <span
+                                  className="fw-bold fs-6 bb-num"
+                                  style={{ color: '#7f1d1d' }}
+                                >
+                                  {formatSummaryMean(metric.decreased.mean, metric.unit)}
+                                </span>
+                              </div>
+                              <div
+                                className="d-flex justify-content-between align-items-baseline small text-body-secondary bb-num mb-2"
+                                style={{ fontSize: '0.76rem' }}
+                              >
+                                <span>
+                                  <strong className="text-dark">{metric.decreased.n}</strong>{' '}
+                                  beneficiar{metric.decreased.n === 1 ? 'y' : 'ies'} ({Math.round(decPct)}%)
+                                </span>
+                                <span>avg loss</span>
+                              </div>
+                              <div
+                                className="rounded-pill overflow-hidden"
+                                style={{ height: '4px', backgroundColor: 'rgba(185, 28, 28, 0.14)' }}
+                              >
+                                <div
+                                  style={{
+                                    width: `${decPct}%`,
+                                    height: '100%',
+                                    backgroundColor: '#b91c1c',
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Companion Counts Strip: Unchanged & No Paired Data */}
+                        <div className="bb-cohort-meta-strip">
+                          <span className="d-inline-flex align-items-center gap-2 text-body-secondary">
+                            <span className="bb-status-dot me-0" style={{ backgroundColor: '#64748b' }} />
+                            <span>Unchanged (same 1st &amp; latest value)</span>
+                            <strong className="text-dark bb-num">
+                              {metric.unchangedCount}
+                            </strong>
+                            <span className="bb-num text-body-secondary" style={{ fontSize: '0.73rem' }}>
+                              ({Math.round(unchPct)}%)
+                            </span>
+                          </span>
+
+                          <span className="d-inline-flex align-items-center gap-2 text-body-secondary">
+                            <span className="bb-status-dot me-0" style={{ backgroundColor: '#cbd5e1' }} />
+                            <span>No paired data (&lt;2 sessions)</span>
+                            <strong className="text-dark bb-num">
+                              {metric.noDataCount}
+                            </strong>
+                            <span className="bb-num text-body-secondary" style={{ fontSize: '0.73rem' }}>
+                              ({Math.round(noDataPct)}%)
+                            </span>
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Modal Footer */}
+              <div
+                className="px-4 py-3 border-top bg-white d-flex flex-wrap justify-content-between align-items-center gap-2 flex-shrink-0"
+                style={{ borderColor: 'rgba(0,0,0,0.06)' }}
+              >
+                <small className="text-body-secondary">
+                  Compares each beneficiary&apos;s earliest valid present reading against their latest valid present reading.
+                </small>
+                <button
+                  type="button"
+                  className="bb-action-chip px-3"
+                  onClick={() => setIsSummaryModalOpen(false)}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 }
